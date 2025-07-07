@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Cave Flyer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Press Start 2P', cursive;
+            background-color: #000000;
+            color: #f0f0f0;
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
+        }
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        canvas {
+            background-color: #0c0c14;
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        .ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            padding: 20px;
+            font-size: 1.5rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.7);
+        }
+        .start-screen, .end-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            z-index: 10;
+        }
+        .btn {
+            background-color: #8e44ad;
+            color: white;
+            padding: 15px 30px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 1.2rem;
+            border: none;
+            box-shadow: 0 5px #6c3483;
+            transition: all 0.1s ease-in-out;
+            margin-top: 20px;
+        }
+        .btn:active {
+            transform: translateY(3px);
+            box-shadow: 0 2px #6c3483;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    <div class="ui-overlay">
+        <div id="pads-left-meter">Pads Left: 3</div>
+    </div>
+    <div id="start-screen" class="start-screen">
+        <h1 class="text-4xl md:text-5xl mb-4">Cave Lander</h1>
+        <p class="mb-2">Land on all 3 pads to win!</p>
+        <p class="mb-4">Controls: Arrow Keys</p>
+        <button id="start-btn" class="btn">Start Flying</button>
+    </div>
+     <div id="end-screen" class="end-screen" style="display: none;">
+        <h1 id="end-message" class="text-4xl md:text-5xl mb-4">You Crashed!</h1>
+        <button id="restart-btn" class="btn">Try Again</button>
+    </div>
+</div>
+
+<script>
+// --- Game Setup ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const startScreen = document.getElementById('start-screen');
+const startBtn = document.getElementById('start-btn');
+const endScreen = document.getElementById('end-screen');
+const restartBtn = document.getElementById('restart-btn');
+const endMessageEl = document.getElementById('end-message');
+const padsLeftMeterEl = document.getElementById('pads-left-meter');
+const gameContainer = document.getElementById('game-container');
+
+// Game state
+let player, topTerrain, bottomTerrain, landingPads;
+let keys = {};
+let gameState = 'start';
+let animationFrameId;
+let padsLeft = 3;
+
+// --- World and Camera ---
+const world = { width: 8000, height: 1500 };
+const camera = { x: 0, y: 0, width: canvas.width, height: canvas.height };
+
+// --- Terrain Generation ---
+function generateTerrainPath(isTop) {
+    const path = [];
+    const segments = 200;
+    const roughness = 0.2;
+    let lastY = isTop ? world.height * 0.4 : world.height * 0.6;
+
+    for (let i = 0; i <= segments; i++) {
+        const x = (world.width / segments) * i;
+        const yOffset = (Math.random() - 0.5) * (world.height * roughness);
+        const y = lastY + yOffset;
+        lastY = y;
+        path.push({ x, y });
+    }
+    return path;
+}
+
+function drawTerrain(ctx, terrainPath, isTop) {
+    ctx.beginPath();
+    ctx.moveTo(terrainPath[0].x, terrainPath[0].y);
+    for (let i = 1; i < terrainPath.length; i++) {
+        ctx.lineTo(terrainPath[i].x, terrainPath[i].y);
+    }
+    if (isTop) {
+        ctx.lineTo(world.width, 0);
+        ctx.lineTo(0, 0);
+    } else {
+        ctx.lineTo(world.width, world.height);
+        ctx.lineTo(0, world.height);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#4a4b5c';
+    ctx.fill();
+    ctx.strokeStyle = '#6a6b7c';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+}
+
+// --- Player Class ---
+class Player {
+    constructor(x, y) {
+        this.startX = x; this.startY = y;
+        this.x = x; this.y = y;
+        this.width = 15; this.height = 20;
+        this.dx = 0; this.dy = 0;
+        this.angle = 0;
+        this.rotationSpeed = 0.05;
+        this.thrust = 0.1;
+        this.friction = 0.995;
+        this.isThrusting = false;
+        this.visible = true;
+    }
+
+    getVertices() {
+        const vertices = [];
+        const angle = this.angle + Math.PI / 2;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        vertices.push({ x: this.x + (0 * cos - (-this.height / 2) * sin), y: this.y + (0 * sin + (-this.height / 2) * cos) });
+        vertices.push({ x: this.x + ((-this.width / 2) * cos - (this.height / 2) * sin), y: this.y + ((-this.width / 2) * sin + (this.height / 2) * cos) });
+        vertices.push({ x: this.x + ((this.width / 2) * cos - (this.height / 2) * sin), y: this.y + ((this.width / 2) * sin + (this.height / 2) * cos) });
+        return vertices;
+    }
+
+    draw(ctx) {
+        if (!this.visible) return;
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle + Math.PI / 2);
+        ctx.beginPath();
+        ctx.moveTo(0, -this.height / 2);
+        ctx.lineTo(-this.width / 2, this.height / 2);
+        ctx.lineTo(this.width / 2, this.height / 2);
+        ctx.closePath();
+        ctx.fillStyle = '#3498db';
+        ctx.fill();
+
+        if (this.isThrusting) {
+            ctx.beginPath();
+            ctx.moveTo(0, this.height / 2);
+            ctx.lineTo(-this.width / 3, this.height / 2 + 10);
+            ctx.lineTo(this.width / 3, this.height / 2 + 10);
+            ctx.closePath();
+            ctx.fillStyle = '#f1c40f';
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    update() {
+        if (!this.visible) return;
+        if (keys['ArrowLeft']) { this.angle -= this.rotationSpeed; }
+        if (keys['ArrowRight']) { this.angle += this.rotationSpeed; }
+
+        this.isThrusting = false;
+        if (keys['ArrowUp']) {
+            this.dx += Math.cos(this.angle) * this.thrust;
+            this.dy += Math.sin(this.angle) * this.thrust;
+            this.isThrusting = true;
+        }
+
+        this.dx *= this.friction;
+        this.dy *= this.friction;
+        
+        this.x += this.dx;
+        this.y += this.dy;
+    }
+    
+    respawn() {
+        const safeSpot = findSafeSpawnPoint();
+        this.x = safeSpot.x;
+        this.y = safeSpot.y;
+        this.dx = 0;
+        this.dy = 0;
+        this.angle = 0;
+    }
+}
+
+// --- Landing Pad Class ---
+class LandingPad {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.width = 100; this.height = 10;
+        this.landed = false;
+    }
+    draw(ctx) {
+        ctx.fillStyle = '#95a5a6';
+        ctx.fillRect(this.x, this.y, this.width, this.height);
+
+        ctx.save();
+        const lightSize = 8;
+        const alpha = 0.6 + Math.sin(Date.now() / 200) * 0.4;
+        ctx.globalAlpha = this.landed ? 1.0 : alpha;
+        ctx.fillStyle = this.landed ? '#2ecc71' : '#e74c3c';
+        
+        ctx.beginPath();
+        ctx.arc(this.x - lightSize, this.y + this.height / 2, lightSize, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.beginPath();
+        ctx.arc(this.x + this.width + lightSize, this.y + this.height / 2, lightSize, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.restore();
+    }
+}
+
+// --- Game Initialization ---
+function init() {
+    topTerrain = generateTerrainPath(true);
+    bottomTerrain = generateTerrainPath(false);
+    
+    const startPos = findSafeSpawnPoint();
+    player = new Player(startPos.x, startPos.y);
+    
+    landingPads = findAndPlaceLandingPads(3);
+    padsLeft = landingPads.length;
+    padsLeftMeterEl.textContent = `Pads Left: ${padsLeft}`;
+
+    startScreen.style.display = 'none';
+    endScreen.style.display = 'none';
+    gameState = 'playing';
+    gameLoop();
+}
+
+// --- Game Loop ---
+function gameLoop() {
+    if (gameState !== 'playing') return;
+    animationFrameId = requestAnimationFrame(gameLoop);
+    
+    player.update();
+
+    if (checkPlayerWallCollision(player)) {
+        endGame(false);
+        return;
+    }
+
+    landingPads.forEach(pad => {
+        if (!pad.landed && checkCollision(player, pad)) {
+            if (checkLanding(player, pad)) {
+                pad.landed = true;
+                padsLeft--;
+                padsLeftMeterEl.textContent = `Pads Left: ${padsLeft}`;
+                if (padsLeft === 0) {
+                    endGame(true);
+                }
+            } else {
+                endGame(false);
+            }
+        }
+    });
+    
+    render();
+}
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    camera.x = player.x - canvas.width / 4;
+    camera.y = player.y - canvas.height / 2;
+    if (camera.x < 0) camera.x = 0;
+    if (camera.y < 0) camera.y = 0;
+    if (camera.x > world.width - canvas.width) camera.x = world.width - canvas.width;
+    if (camera.y > world.height - canvas.height) camera.y = world.height - canvas.height;
+
+    ctx.save();
+    ctx.translate(-camera.x, -camera.y);
+
+    drawTerrain(ctx, topTerrain, true);
+    drawTerrain(ctx, bottomTerrain, false);
+    landingPads.forEach(pad => pad.draw(ctx));
+    player.draw(ctx);
+
+    ctx.restore();
+}
+
+// --- Helper Functions ---
+function getPlayerVertices(p) {
+    const vertices = [];
+    const angle = p.angle + Math.PI / 2;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    vertices.push({ x: p.x + (0 * cos - (-p.height / 2) * sin), y: p.y + (0 * sin + (-p.height / 2) * cos) });
+    vertices.push({ x: p.x + ((-p.width / 2) * cos - (p.height / 2) * sin), y: p.y + ((-p.width / 2) * sin + (p.height / 2) * cos) });
+    vertices.push({ x: p.x + ((p.width / 2) * cos - (p.height / 2) * sin), y: p.y + ((p.width / 2) * sin + (p.height / 2) * cos) });
+    return vertices;
+}
+
+function checkPlayerWallCollision(p) {
+    const vertices = getPlayerVertices(p);
+    for (const vertex of vertices) {
+        const topY = getTerrainYAtX(vertex.x, topTerrain);
+        const bottomY = getTerrainYAtX(vertex.x, bottomTerrain);
+        if (vertex.y < topY || vertex.y > bottomY) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function getTerrainYAtX(x, path) {
+    for (let i = 0; i < path.length - 1; i++) {
+        const p1 = path[i];
+        const p2 = path[i+1];
+        if (x >= p1.x && x <= p2.x) {
+            const slope = (p2.y - p1.y) / (p2.x - p1.x);
+            return p1.y + slope * (x - p1.x);
+        }
+    }
+    return world.height / 2;
+}
+
+function findSafeSpawnPoint() {
+    let safeX, safeY;
+    let isSafe = false;
+    let attempts = 0;
+    while (!isSafe && attempts < 100) {
+        safeX = 100;
+        safeY = world.height / 2;
+        const topY = getTerrainYAtX(safeX, topTerrain);
+        const bottomY = getTerrainYAtX(safeX, bottomTerrain);
+        if (bottomY - topY > 200) {
+            isSafe = true;
+        }
+        attempts++;
+    }
+    return { x: safeX, y: safeY };
+}
+
+function findAndPlaceLandingPads(count) {
+    const pads = [];
+    const potentialSpots = [];
+    const padWidth = 100;
+
+    for (let i = 10; i < bottomTerrain.length - 12; i++) {
+        const p1 = bottomTerrain[i];
+        const p2 = bottomTerrain[i+10];
+        const slope = Math.abs(p2.y - p1.y);
+        
+        if (slope < 10) { 
+            const midX = (p1.x + p2.x) / 2;
+            const topY = getTerrainYAtX(midX, topTerrain);
+            if (p1.y - topY > 300) {
+                potentialSpots.push({ x: p1.x, y: p1.y - 10, flatness: 1 / (slope + 1) });
+            }
+        }
+    }
+
+    potentialSpots.sort((a, b) => b.flatness - a.flatness);
+    
+    const minDistance = 1500;
+    for(const spot of potentialSpots) {
+        if(pads.length >= count) break;
+        let isFarEnough = true;
+        for(const pad of pads) {
+            if(Math.abs(pad.x - spot.x) < minDistance) {
+                isFarEnough = false;
+                break;
+            }
+        }
+        if(isFarEnough) {
+            pads.push(new LandingPad(spot.x, spot.y));
+        }
+    }
+    return pads;
+}
+
+
+function checkCollision(player, pad) {
+    const vertices = getPlayerVertices(player);
+    for (const v of vertices) {
+        if (v.x > pad.x && v.x < pad.x + pad.width && v.y > pad.y && v.y < pad.y + pad.height) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function checkLanding(player, pad) {
+    const speed = Math.hypot(player.dx, player.dy);
+    if (speed > 1.5) return false;
+
+    const targetAngle = -Math.PI / 2; 
+    let angleDiff = Math.abs(player.angle - targetAngle);
+    if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+    if (angleDiff > 0.4) return false;
+
+    const vertices = getPlayerVertices(player);
+    const baseCenter = {
+        x: (vertices[1].x + vertices[2].x) / 2,
+        y: (vertices[1].y + vertices[2].y) / 2,
+    };
+    
+    return baseCenter.x > pad.x && baseCenter.x < pad.x + pad.width &&
+           baseCenter.y > pad.y && baseCenter.y < pad.y + 20;
+}
+
+function endGame(isWin) {
+    gameState = 'over';
+    endMessageEl.textContent = isWin ? "You Win!" : "You Crashed!";
+    endScreen.style.display = 'flex';
+    cancelAnimationFrame(animationFrameId);
+}
+
+// --- Event Listeners ---
+window.addEventListener('keydown', (e) => {
+    keys[e.code] = true;
+});
+window.addEventListener('keyup', (e) => {
+    keys[e.code] = false;
+});
+
+startBtn.addEventListener('click', init);
+restartBtn.addEventListener('click', init);
+
+// Initial Setup
+function resizeCanvas() {
+    canvas.width = gameContainer.clientWidth;
+    canvas.height = gameContainer.clientHeight;
+    if(gameState === 'start') {
+        renderInitial();
+    }
+}
+
+function renderInitial() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+</script>
+</body>
+</html>
