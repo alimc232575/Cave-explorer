@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Cave Flyer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Press Start 2P', cursive; background-color: #000; color: #f0f0f0; overflow: hidden; margin: 0; padding: 0; }
+        #game-container { position: relative; width: 100vw; height: 100vh; }
+        canvas { background-color: #0c0c14; display: block; width: 100%; height: 100%; }
+        .ui-overlay { position: absolute; inset: 0; pointer-events: none; padding: 20px; font-size: 1.5rem; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); }
+        .start-screen, .end-screen { position: absolute; inset: 0; background: rgba(0,0,0,0.85); display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; z-index: 10; }
+        .btn { background: #8e44ad; color: #fff; padding: 15px 30px; border-radius: 10px; cursor: pointer; font-size: 1.2rem; border: none; box-shadow: 0 5px #6c3483; transition: all .1s ease-in-out; margin-top: 20px; }
+        .btn:active { transform: translateY(3px); box-shadow: 0 2px #6c3483; }
+    .map-ui{position:absolute;top:12px;right:12px;z-index:20;pointer-events:auto}
+#map-file{display:none}
+.drop-overlay{position:absolute;inset:0;background:rgba(255,255,255,.06);border:2px dashed #8e44ad;display:none;align-items:center;justify-content:center;z-index:15}
+.drop-overlay.show{display:flex}
+.drop-overlay p{font-size:1rem;opacity:.9}
+</style>
+</head>
+<body>
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+<div id="drop-overlay" class="drop-overlay"><p>Drop your SVG/PNG map to import</p></div>
+    <div class="ui-overlay"><div id="pads-left-meter">Pads Left: 5</div></div>
+    <div id="start-screen" class="start-screen">
+        <h1 class="text-4xl md:text-5xl mb-4">Cave Lander</h1>
+        <p class="mb-2">Land on all 5 pads to win!</p>
+        <p class="mb-4">Controls: Arrow Keys</p>
+        <button id="start-btn" class="btn">Start Flying</button>
+    </div>
+    <div id="end-screen" class="end-screen" style="display:none;">
+        <h1 id="end-message" class="text-4xl md:text-5xl mb-4">You Crashed!</h1>
+        <button id="restart-btn" class="btn">Try Again</button>
+    </div>
+</div>
+
+<script>
+// --- Game Setup ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const startScreen = document.getElementById('start-screen');
+const startBtn = document.getElementById('start-btn');
+const endScreen = document.getElementById('end-screen');
+const restartBtn = document.getElementById('restart-btn');
+const endMessageEl = document.getElementById('end-message');
+const padsLeftMeterEl = document.getElementById('pads-left-meter');
+const gameContainer = document.getElementById('game-container');
+
+// Game state
+let player, topTerrain, bottomTerrain, landingPads, obstacles; // internal cave walls as obstacles
+let chamberXs = []; // legacy
+let mazeDeadEnds = [];
+let mazeMeta = null;
+let obstaclesPolys = []; // precomputed jagged polygons for drawing (rects kept for collision)
+let keys = {};
+let gameState = 'start';
+let animationFrameId;
+let padsLeft = 5;
+
+// --- World and Camera ---
+const world = { width: 20000, height: 7000 }; // expanded labyrinth world // expanded world for exploration labyrinth // large handcrafted world
+const camera = { x: 0, y: 0 };
+
+// --- Terrain Generation ---
+const MIN_GAP = 260;   // minimum vertical clearance
+const MAX_GAP = 360;   // max clearance (adds variety)
+const SEGMENTS = 420;  // more detail for complex/maze-like shapes
+// Seeded RNG so the maze is stable across runs
+let RNG_SEED = 987654321;
+function srand(s){ RNG_SEED = (s>>>0) || 1; }
+function frand(){ RNG_SEED = (RNG_SEED*1664525 + 1013904223)>>>0; return ((RNG_SEED>>>8)&0xFFFFFF)/0x1000000; }
+
+function generateCavePaths() {
+    // Wide open cavern bounds; the maze is formed by internal walls (obstacles)
+    const top = []; const bottom = [];
+    const W = world.width, H = world.height;
+    for (let i = 0; i <= SEGMENTS; i++) {
+        const x = (W / SEGMENTS) * i;
+        const t = i / SEGMENTS;
+        const topY = 140 + 40 * Math.sin(t * Math.PI * 2 * 0.6);
+        const botY = H - 140 + 40 * Math.sin(t * Math.PI * 2 * 0.55 + 1.3);
+        top.push({ x, y: topY });
+        bottom.push({ x, y: botY });
+    }
+    topTerrain = top; bottomTerrain = bottom;
+}
+
+function drawTerrain(ctx, terrainPath, isTop) {
+    ctx.beginPath();
+    ctx.moveTo(terrainPath[0].x, terrainPath[0].y);
+    for (let i = 1; i < terrainPath.length; i++) ctx.lineTo(terrainPath[i].x, terrainPath[i].y);
+    if (isTop) { ctx.lineTo(world.width, 0); ctx.lineTo(0, 0); }
+    else { ctx.lineTo(world.width, world.height); ctx.lineTo(0, world.height); }
+    ctx.closePath();
+    ctx.fillStyle = '#4a4b5c'; ctx.fill();
+    ctx.strokeStyle = '#6a6b7c'; ctx.lineWidth = 3; ctx.stroke();
+}
+
+// --- Obstacles (maze made of internal cave walls) ---
+function buildMazeGraph() {
+  const W = world.width, H = world.height;
+  const margin = 320;
+  const COLS = 22, ROWS = 12;
+  const cellW = Math.floor((W - margin * 2) / COLS);
+  const cellH = Math.floor((H - margin * 2) / ROWS);
+  const wallT = 120; // wall thickness
+
+  // Cells with openings N,S,E,W (false = wall present)
+  const cells = Array.from({ length: ROWS }, (_, r) =>
+    Array.from({ length: COLS }, (_, c) => ({ r, c, v: false, N: false, S: false, E: false, W: false }))
+  );
+
+  function neighbors(r, c) {
+    const list = [];
+    if (r > 0) list.push(cells[r - 1][c]);
+    if (r < ROWS - 1) list.push(cells[r + 1][c]);
+    if (c > 0) list.push(cells[r][c - 1]);
+    if (c < COLS - 1) list.push(cells[r][c + 1]);
+    return list;
+  }
+
+  // DFS maze (spanning tree)
+  const sr = Math.floor(Math.random() * ROWS);
+  const sc = Math.floor(Math.random() * COLS);
+  const stack = [cells[sr][sc]];
+  cells[sr][sc].v = true;
+  while (stack.length) {
+    const cur = stack[stack.length - 1];
+    const nbs = neighbors(cur.r, cur.c).filter(nb => !nb.v);
+    if (!nbs.length) { stack.pop(); continue; }
+    const nb = nbs[Math.floor(Math.random() * nbs.length)];
+    if (nb.r < cur.r) { cur.N = true; nb.S = true; }
+    else if (nb.r > cur.r) { cur.S = true; nb.N = true; }
+    else if (nb.c < cur.c) { cur.W = true; nb.E = true; }
+    else if (nb.c > cur.c) { cur.E = true; nb.W = true; }
+    nb.v = true; stack.push(nb);
+  }
+
+  // Add loops and chambers (remove some random walls)
+  for (let k = 0; k < COLS * ROWS * 0.22; k++) {
+    const r = Math.floor(Math.random() * ROWS);
+    const c = Math.floor(Math.random() * COLS);
+    const dir = Math.floor(Math.random() * 4);
+    const cell = cells[r][c];
+    if (dir === 0 && r > 0) { cell.N = true; cells[r - 1][c].S = true; }
+    if (dir === 1 && r < ROWS - 1) { cell.S = true; cells[r + 1][c].N = true; }
+    if (dir === 2 && c > 0) { cell.W = true; cells[r][c - 1].E = true; }
+    if (dir === 3 && c < COLS - 1) { cell.E = true; cells[r][c + 1].W = true; }
+  }
+  // carve a few larger chambers by clearing 2x2 blocks
+  for (let k = 0; k < 6; k++) {
+    const r0 = 1 + Math.floor(Math.random() * (ROWS - 2));
+    const c0 = 1 + Math.floor(Math.random() * (COLS - 2));
+    const cells2 = [cells[r0][c0], cells[r0+1][c0], cells[r0][c0+1], cells[r0+1][c0+1]];
+    cells2[0].E = cells2[1].E = cells2[2].E = cells2[3].E = true;
+    cells2[0].S = cells2[1].S = cells2[2].S = cells2[3].S = true;
+    cells2[0].W = cells2[1].W = cells2[2].W = cells2[3].W = true;
+    cells2[0].N = cells2[1].N = cells2[2].N = cells2[3].N = true;
+  }
+
+  // Convert remaining walls to obstacle rectangles (only build N and W to avoid duplicates)
+  const obstaclesRects = [];
+  function addRect(x, y, w, h){ obstaclesRects.push({ x, y, w, h }); }
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x0 = margin + c * cellW;
+      const y0 = margin + r * cellH;
+      const cell = cells[r][c];
+      if (!cell.N) addRect(x0, y0 - wallT / 2, cellW, wallT);
+      if (!cell.W) addRect(x0 - wallT / 2, y0, wallT, cellH);
+      // outer boundary E/S walls for outermost cells
+      if (c === COLS - 1 && !cell.E) addRect(x0 + cellW - wallT / 2, y0, wallT, cellH);
+      if (r === ROWS - 1 && !cell.S) addRect(x0, y0 + cellH - wallT / 2, cellW, wallT);
+    }
+  }
+
+  // Dead-end centers for pad placement
+  const deadEnds = [];
+  const centers = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const cell = cells[r][c];
+      const deg = (cell.N?1:0)+(cell.S?1:0)+(cell.E?1:0)+(cell.W?1:0);
+      const cx = margin + c * cellW + cellW/2;
+      const cy = margin + r * cellH + cellH/2;
+      centers.push({x:cx,y:cy,deg});
+      if (deg === 1) deadEnds.push({x:cx,y:cy});
+    }
+  }
+  return { obstaclesRects, deadEnds, meta: { margin, COLS, ROWS, cellW, cellH, wallT, centers } };
+}
+
+function generateObstacles() {
+  const maze = buildMazeGraph();
+  obstacles = maze.obstaclesRects;
+  mazeDeadEnds = maze.deadEnds;
+  mazeMeta = maze.meta;
+  // Build jagged cave-style polygons for rendering (rects remain for collision)
+  obstaclesPolys = obstacles.map(o => makeJaggedPoly(o));
+}
+
+// --- Jagged cave wall helpers ---
+function makeJaggedPoly(o){
+  const nx = Math.max(3, Math.round(o.w / 140));
+  const ny = Math.max(2, Math.round(o.h / 140));
+  const A  = Math.min(40, Math.max(14, Math.min(o.w, o.h) * 0.25)); // jitter amplitude
+  const seedBase = o.x*0.013 + o.y*0.017 + o.w*0.019 + o.h*0.023;
+  function randFor(k){ const s = Math.sin(k) * 43758.5453123; return s - Math.floor(s); }
+  function jv(k){ return (randFor(seedBase + k*12.7) * 2 - 1) * A; } // vertical jitter
+  function jh(k){ return (randFor(seedBase + k*9.9)  * 2 - 1) * A; } // horizontal jitter
+  const pts = [];
+  // top edge
+  for (let i=0;i<=nx;i++){ const t=i/nx; const x=o.x + t*o.w; const y=o.y + jv(i); pts.push({x,y}); }
+  // right edge
+  for (let j=1;j<=ny;j++){ const t=j/ny; const x=o.x + o.w + jh(j); const y=o.y + t*o.h; pts.push({x,y}); }
+  // bottom edge
+  for (let i=nx;i>=0;i--){ const t=i/nx; const x=o.x + t*o.w; const y=o.y + o.h + jv(1000+i); pts.push({x,y}); }
+  // left edge
+  for (let j=ny;j>=1;j--){ const t=j/ny; const x=o.x + jh(2000+j); const y=o.y + t*o.h; pts.push({x,y}); }
+  return pts;
+}
+
+function drawObstacles(ctx) {
+  if (obstaclesPolys && obstaclesPolys.length) {
+    for (const poly of obstaclesPolys) {
+      ctx.beginPath();
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let k=1;k<poly.length;k++) ctx.lineTo(poly[k].x, poly[k].y);
+      ctx.closePath();
+      ctx.fillStyle = '#4a4b5c';
+      ctx.fill();
+      ctx.strokeStyle = '#6a6b7c';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  } else {
+    // Fallback to rectangles if polys missing
+    ctx.fillStyle = '#4a4b5c';
+    for (const o of obstacles) ctx.fillRect(o.x, o.y, o.w, o.h);
+    ctx.strokeStyle = '#6a6b7c'; ctx.lineWidth = 2;
+    for (const o of obstacles) ctx.strokeRect(o.x, o.y, o.w, o.h);
+  }
+}
+
+function pointInObstacle(x, y) {
+  for (const o of obstacles) { if (x >= o.x && x <= o.x + o.w && y >= o.y && y <= o.y + o.h) return true; }
+  return false;
+}
+
+// --- Player Class ---
+class Player {
+    constructor(x, y) {
+        this.startX = x; this.startY = y;
+        this.x = x; this.y = y;
+        this.width = 15; this.height = 20;
+        this.dx = 0; this.dy = 0;
+        this.angle = 0;
+        this.rotationSpeed = 0.05;
+        this.thrust = 0.1;
+        this.friction = 0.995;
+        this.isThrusting = false;
+        this.visible = true;
+    }
+    getVertices() {
+        const vertices = [];
+        const angle = this.angle + Math.PI / 2;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        vertices.push({ x: this.x + (0 * cos - (-this.height / 2) * sin), y: this.y + (0 * sin + (-this.height / 2) * cos) });
+        vertices.push({ x: this.x + ((-this.width / 2) * cos - (this.height / 2) * sin), y: this.y + ((-this.width / 2) * sin + (this.height / 2) * cos) });
+        vertices.push({ x: this.x + ((this.width / 2) * cos - (this.height / 2) * sin), y: this.y + ((this.width / 2) * sin + (this.height / 2) * cos) });
+        return vertices;
+    }
+    draw(ctx) {
+        if (!this.visible) return;
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle + Math.PI / 2);
+        ctx.beginPath();
+        ctx.moveTo(0, -this.height / 2);
+        ctx.lineTo(-this.width / 2, this.height / 2);
+        ctx.lineTo(this.width / 2, this.height / 2);
+        ctx.closePath();
+        ctx.fillStyle = '#3498db';
+        ctx.fill();
+        if (this.isThrusting) {
+            ctx.beginPath();
+            ctx.moveTo(0, this.height / 2);
+            ctx.lineTo(-this.width / 3, this.height / 2 + 10);
+            ctx.lineTo(this.width / 3, this.height / 2 + 10);
+            ctx.closePath();
+            ctx.fillStyle = '#f1c40f';
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+    update() {
+        if (!this.visible) return;
+        if (keys['ArrowLeft']) this.angle -= this.rotationSpeed;
+        if (keys['ArrowRight']) this.angle += this.rotationSpeed;
+        this.isThrusting = false;
+        if (keys['ArrowUp']) {
+            this.dx += Math.cos(this.angle) * this.thrust;
+            this.dy += Math.sin(this.angle) * this.thrust;
+            this.isThrusting = true;
+        }
+        this.dx *= this.friction; this.dy *= this.friction;
+        this.x += this.dx; this.y += this.dy;
+    }
+    respawn() {
+        const safeSpot = findSafeSpawnPoint();
+        this.x = safeSpot.x; this.y = safeSpot.y; this.dx = 0; this.dy = 0; this.angle = 0;
+    }
+}
+
+// --- Landing Pad Class ---
+class LandingPad {
+    constructor(x, y) { this.x = x; this.y = y; this.width = 160; this.height = 10; this.landed = false; }
+    draw(ctx) {
+        ctx.fillStyle = '#95a5a6'; ctx.fillRect(this.x, this.y, this.width, this.height);
+        ctx.save();
+        const lightSize = 8; const alpha = 0.6 + Math.sin(Date.now() / 200) * 0.4;
+        ctx.globalAlpha = this.landed ? 1.0 : alpha; ctx.fillStyle = this.landed ? '#2ecc71' : '#e74c3c';
+        ctx.beginPath(); ctx.arc(this.x - lightSize, this.y + this.height / 2, lightSize, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(this.x + this.width + lightSize, this.y + this.height / 2, lightSize, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    }
+}
+
+// --- Game Initialization ---
+function init() {
+    generateCavePaths();
+    generateObstacles();
+    landingPads = findAndPlaceLandingPads(5);
+    const start = landingPads.length
+        ? { x: landingPads[0].x + landingPads[0].width * 0.5, y: landingPads[0].y - 80 }
+        : findSafeSpawnPoint();
+    player = new Player(start.x, start.y);
+    padsLeft = landingPads.length; padsLeftMeterEl.textContent = `Pads Left: ${padsLeft}`;
+    startScreen.style.display = 'none'; endScreen.style.display = 'none';
+    gameState = 'playing';
+    gameLoop();
+}
+
+// --- Game Loop ---
+function gameLoop() {
+    if (gameState !== 'playing') return;
+    animationFrameId = requestAnimationFrame(gameLoop);
+
+    player.update();
+    applyTractorBeam(player);
+
+    // Handle pads first so base-first contact can land before wall checks
+    for (const pad of landingPads) {
+        if (pad.landed) continue;
+        if (checkCollision(player, pad)) {
+            if (noseFacingPad(player, pad)) { endGame(false); return; }
+            if (checkLanding(player, pad) || canSoftLand(player, pad) || baseFacingPad(player, pad)) {
+                forceSnapLand(player, pad);
+                pad.landed = true; padsLeft--; padsLeftMeterEl.textContent = `Pads Left: ${padsLeft}`;
+                if (padsLeft === 0) { endGame(true); return; }
+            } else { endGame(false); return; }
+        }
+    }
+
+    // Then apply wall collisions
+    if (checkPlayerWallCollision(player)) { endGame(false); return; }
+
+    render();
+}
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    camera.x = player.x - canvas.width / 4; camera.y = player.y - canvas.height / 2;
+    if (camera.x < 0) camera.x = 0; if (camera.y < 0) camera.y = 0;
+    if (camera.x > world.width - canvas.width) camera.x = world.width - canvas.width;
+    if (camera.y > world.height - canvas.height) camera.y = world.height - canvas.height;
+    ctx.save(); ctx.translate(-camera.x, -camera.y);
+    drawTerrain(ctx, topTerrain, true); drawTerrain(ctx, bottomTerrain, false); drawObstacles(ctx);
+    landingPads.forEach(pad => pad.draw(ctx)); player.draw(ctx);
+    ctx.restore();
+}
+
+// --- Helper Functions ---
+function getPlayerVertices(p) {
+    const angle = p.angle + Math.PI / 2; const cos = Math.cos(angle); const sin = Math.sin(angle);
+    return [
+        { x: p.x + (0 * cos - (-p.height / 2) * sin), y: p.y + (0 * sin + (-p.height / 2) * cos) },
+        { x: p.x + ((-p.width / 2) * cos - (p.height / 2) * sin), y: p.y + ((-p.width / 2) * sin + (p.height / 2) * cos) },
+        { x: p.x + ((p.width / 2) * cos - (p.height / 2) * sin), y: p.y + ((p.width / 2) * sin + (p.height / 2) * cos) },
+    ];
+}
+
+// Assistive Landing / Tractor Beam
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function getBaseCenter(p){ const v = getPlayerVertices(p); return { x:(v[1].x+v[2].x)/2, y:(v[1].y+v[2].y)/2 }; }
+function baseFacingPad(player, pad){
+    // Is the ship's BASE (opposite the nose) pointing toward the pad?
+    const nx = Math.cos(player.angle), ny = Math.sin(player.angle); // nose dir
+    const bx = -nx, by = -ny; // base dir
+    const base = getBaseCenter(player);
+    const toPadX = (pad.x + pad.width/2) - base.x; const toPadY = pad.y - base.y;
+    const len = Math.hypot(toPadX, toPadY) || 1;
+    const dot = (bx*toPadX + by*toPadY) / len; // cosine of angle between base and pad vector
+    return dot > 0.18; // wider base-facing cone (~80°)
+}
+function noseFacingPad(player, pad){
+    const nx = Math.cos(player.angle), ny = Math.sin(player.angle);
+    const base = getBaseCenter(player);
+    const toPadX = (pad.x + pad.width/2) - base.x; const toPadY = pad.y - base.y;
+    const len = Math.hypot(toPadX, toPadY) || 1;
+    const dot = (nx*toPadX + ny*toPadY) / len;
+    return dot > 0.7; // only very clear nose-first counts as crash
+}
+function forceSnapLand(player, pad){
+    const base = getBaseCenter(player);
+    const padCx = pad.x + pad.width/2;
+    player.x += (padCx - base.x) * 0.7; player.y += (pad.y - base.y) * 0.7;
+    player.dx = 0; player.dy = 0; player.angle = -Math.PI/2;
+}
+
+function applyTractorBeam(player){
+    // Light assist only when BASE faces pad and within ~one lander length
+    const landerLen = Math.hypot(player.width, player.height);
+    for(const pad of landingPads){ if(pad.landed) continue;
+        const base = getBaseCenter(player);
+        const padCx = pad.x + pad.width/2;
+        const dx = padCx - base.x; const dy = pad.y - base.y; // >0 means pad is below the base
+        if (dy <= 0 || dy > landerLen * 1.65) continue; // vertical window
+        if (Math.abs(dx) > pad.width * 1.1) continue;    // horizontal window
+        if (!baseFacingPad(player, pad)) continue;       // orientation
+        const strength = 1 - (dy / (landerLen * 1.65));   // 0..1
+        player.dx += dx * 0.0012 * strength;             // center
+        player.dy += dy * 0.0020 * strength;             // descend
+        const target = -Math.PI/2;                       // auto-level a touch
+        let diff = target - player.angle; if (diff > Math.PI) diff -= 2*Math.PI; if (diff < -Math.PI) diff += 2*Math.PI;
+        player.angle += diff * 0.05 * strength;
+        const damp = 1 - 0.004 * strength; player.dx *= damp; player.dy *= damp;
+    }
+}
+function canSoftLand(player, pad){
+    if (!baseFacingPad(player, pad)) return false;
+    const base = getBaseCenter(player);
+    const overPadX = base.x > pad.x && base.x < pad.x + pad.width;
+    const nearY = Math.abs(base.y - pad.y) < 34; // more forgiving proximity
+    if (overPadX && nearY){
+        const padCx = pad.x + pad.width/2;
+        player.x += (padCx - base.x) * 0.5; player.y += (pad.y - base.y) * 0.5;
+        player.dx = 0; player.dy = 0; player.angle = -Math.PI/2;
+        return true;
+    }
+    return false;
+}
+
+function checkPlayerWallCollision(p) {
+    const vertices = getPlayerVertices(p);
+    for (const v of vertices) {
+        const topY = getTerrainYAtX(v.x, topTerrain);
+        const bottomY = getTerrainYAtX(v.x, bottomTerrain);
+        if (v.y < topY || v.y > bottomY) return true;
+        if (pointInObstacle(v.x, v.y)) return true;
+    }
+    return false;
+}
+
+
+function getTerrainYAtX(x, path) {
+    for (let i = 0; i < path.length - 1; i++) {
+        const p1 = path[i]; const p2 = path[i+1];
+        if (x >= p1.x && x <= p2.x) {
+            const slope = (p2.y - p1.y) / (p2.x - p1.x);
+            return p1.y + slope * (x - p1.x);
+        }
+    }
+    return world.height / 2;
+}
+
+function findSafeSpawnPoint() {
+    let safeX = 100, safeY = world.height / 2, attempts = 0;
+    while (attempts < 100) {
+        const topY = getTerrainYAtX(safeX, topTerrain);
+        const bottomY = getTerrainYAtX(safeX, bottomTerrain);
+        if (bottomY - topY > 200) break;
+        safeX += 50; attempts++;
+    }
+    return { x: safeX, y: safeY };
+}
+
+function findAndPlaceLandingPads(count) {
+  const pads = [];
+  const padW = 160, padH = 10;
+  const minDist = 3000;
+
+  // Prefer maze dead-ends first (exploration incentive)
+  const candidates = (mazeDeadEnds && mazeDeadEnds.length) ? mazeDeadEnds.slice() : [];
+  // Shuffle candidates
+  for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
+
+  function tryAddAt(cx, cy){
+    const xpad = cx - padW/2;
+    const ypad = cy + (mazeMeta ? Math.min(mazeMeta.cellH*0.25, 200) : 160);
+    if (isPadRectFlyable(xpad, ypad, padW, padH) && pads.every(p => Math.hypot((p.x+padW/2) - cx, (p.y) - ypad) > minDist)) {
+      pads.push(new LandingPad(xpad, ypad));
+      return true;
+    }
+    return false;
+  }
+
+  for (const p of candidates) { if (pads.length >= count) break; tryAddAt(p.x, p.y); }
+
+  // If still short, drop pads at high-degree intersections
+  if (mazeMeta && pads.length < count) {
+    const high = mazeMeta.centers.filter(c => c.deg >= 3);
+    for (const c of high) { if (pads.length >= count) break; tryAddAt(c.x, c.y); }
+  }
+
+  // Fallback: scan world for wide clear shelves
+  for (let scan = 400; pads.length < count && scan < world.width - padW; scan += 600) {
+    const cx = scan + padW/2; const tY = getTerrainYAtX(cx, topTerrain); const bY = getTerrainYAtX(cx, bottomTerrain);
+    const y = Math.min(bY - 170, (tY + bY) / 2 + 200);
+    const xpad = scan; const ypad = y;
+    if (isPadRectFlyable(xpad, ypad, padW, padH) && pads.every(p => Math.hypot((p.x+padW/2) - (xpad+padW/2), p.y - ypad) > minDist*0.8)) pads.push(new LandingPad(xpad, ypad));
+  }
+
+  return pads.slice(0, count);
+}
+
+function isPadRectFlyable(xpad, ypad, w, h){
+  // Check against cave ceiling/floor
+  for (let k = 0; k <= 12; k++) {
+    const x = xpad + (k/12)*w;
+    const tY = getTerrainYAtX(x, topTerrain);
+    const bY = getTerrainYAtX(x, bottomTerrain);
+    if (ypad < tY + 8 || ypad + h > bY - 8) return false;
+  }
+  // Check against internal walls
+  for (const o of obstacles) {
+    if (!(xpad + w < o.x || xpad > o.x + o.w || ypad + h < o.y || ypad > o.y + o.h)) return false;
+  }
+  return true;
+}
+
+function checkCollision(player, pad) {
+    const v = getPlayerVertices(player);
+    for (const p of v) if (p.x > pad.x && p.x < pad.x + pad.width && p.y > pad.y && p.y < pad.y + pad.height) return true;
+    return false;
+}
+
+function checkLanding(player, pad) {
+    const speed = Math.hypot(player.dx, player.dy);
+    if (speed > 4.2) return false; // allow faster touchdowns
+    const targetAngle = -Math.PI / 2; 
+    let angleDiff = Math.abs(player.angle - targetAngle);
+    if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+    if (angleDiff > 0.85) return false; // allow more tilt
+    const v = getPlayerVertices(player);
+    const baseCenter = { x: (v[1].x + v[2].x) / 2, y: (v[1].y + v[2].y) / 2 };
+    return baseCenter.x > pad.x && baseCenter.x < pad.x + pad.width && baseCenter.y > pad.y && baseCenter.y < pad.y + 30;
+}
+
+function endGame(isWin) {
+    gameState = 'over'; endMessageEl.textContent = isWin ? 'You Win!' : 'You Crashed!';
+    endScreen.style.display = 'flex'; cancelAnimationFrame(animationFrameId);
+}
+
+// --- Event Listeners ---
+window.addEventListener('keydown', (e) => { if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault(); keys[e.code] = true; });
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+startBtn.addEventListener('click', init);
+restartBtn.addEventListener('click', init);
+
+// Initial Setup
+function resizeCanvas() {
+    canvas.width = gameContainer.clientWidth; canvas.height = gameContainer.clientHeight;
+    if (gameState === 'start') renderInitial();
+}
+function renderInitial() { ctx.clearRect(0, 0, canvas.width, canvas.height); }
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// Safety: surface JS errors so it's obvious why Start might not work
+window.addEventListener('error', (e) => {
+  console.error(e.error || e.message || e);
+  endMessageEl.textContent = 'Script error: ' + (e.message || 'unknown');
+  endScreen.style.display = 'flex';
+});</script>
+</body>
+</html>
