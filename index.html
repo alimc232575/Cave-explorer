@@ -7,82 +7,32 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
     <style>
-        body {
-            font-family: 'Press Start 2P', cursive;
-            background-color: #000000;
-            color: #f0f0f0;
-            overflow: hidden;
-            margin: 0;
-            padding: 0;
-        }
-        #game-container {
-            position: relative;
-            width: 100vw;
-            height: 100vh;
-        }
-        canvas {
-            background-color: #0c0c14;
-            display: block;
-            width: 100%;
-            height: 100%;
-        }
-        .ui-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            padding: 20px;
-            font-size: 1.5rem;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.7);
-        }
-        .start-screen, .end-screen {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.85);
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            text-align: center;
-            z-index: 10;
-        }
-        .btn {
-            background-color: #8e44ad;
-            color: white;
-            padding: 15px 30px;
-            border-radius: 10px;
-            cursor: pointer;
-            font-size: 1.2rem;
-            border: none;
-            box-shadow: 0 5px #6c3483;
-            transition: all 0.1s ease-in-out;
-            margin-top: 20px;
-        }
-        .btn:active {
-            transform: translateY(3px);
-            box-shadow: 0 2px #6c3483;
-        }
-    </style>
+        body { font-family: 'Press Start 2P', cursive; background-color: #000; color: #f0f0f0; overflow: hidden; margin: 0; padding: 0; }
+        #game-container { position: relative; width: 100vw; height: 100vh; }
+        canvas { background-color: #0c0c14; display: block; width: 100%; height: 100%; }
+        .ui-overlay { position: absolute; inset: 0; pointer-events: none; padding: 20px; font-size: 1.5rem; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); }
+        .start-screen, .end-screen { position: absolute; inset: 0; background: rgba(0,0,0,0.85); display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; z-index: 10; }
+        .btn { background: #8e44ad; color: #fff; padding: 15px 30px; border-radius: 10px; cursor: pointer; font-size: 1.2rem; border: none; box-shadow: 0 5px #6c3483; transition: all .1s ease-in-out; margin-top: 20px; }
+        .btn:active { transform: translateY(3px); box-shadow: 0 2px #6c3483; }
+    .map-ui{position:absolute;top:12px;right:12px;z-index:20;pointer-events:auto}
+#map-file{display:none}
+.drop-overlay{position:absolute;inset:0;background:rgba(255,255,255,.06);border:2px dashed #8e44ad;display:none;align-items:center;justify-content:center;z-index:15}
+.drop-overlay.show{display:flex}
+.drop-overlay p{font-size:1rem;opacity:.9}
+</style>
 </head>
 <body>
-
 <div id="game-container">
     <canvas id="gameCanvas"></canvas>
-    <div class="ui-overlay">
-        <div id="pads-left-meter">Pads Left: 3</div>
-    </div>
+<div id="drop-overlay" class="drop-overlay"><p>Drop your SVG/PNG map to import</p></div>
+    <div class="ui-overlay"><div id="pads-left-meter">Pads Left: 5</div><div id="turrets-left" class="mt-2 text-base opacity-80">Turrets: 0</div></div>
     <div id="start-screen" class="start-screen">
         <h1 class="text-4xl md:text-5xl mb-4">Cave Lander</h1>
-        <p class="mb-2">Land on all 3 pads to win!</p>
-        <p class="mb-4">Controls: Arrow Keys</p>
+        <p class="mb-2">Land on all 5 pads to win!</p>
+        <p class="mb-4">Controls: Arrow Keys + Space (shoot)</p>
         <button id="start-btn" class="btn">Start Flying</button>
     </div>
-     <div id="end-screen" class="end-screen" style="display: none;">
+    <div id="end-screen" class="end-screen" style="display:none;">
         <h1 id="end-message" class="text-4xl md:text-5xl mb-4">You Crashed!</h1>
         <button id="restart-btn" class="btn">Try Again</button>
     </div>
@@ -98,55 +48,228 @@ const endScreen = document.getElementById('end-screen');
 const restartBtn = document.getElementById('restart-btn');
 const endMessageEl = document.getElementById('end-message');
 const padsLeftMeterEl = document.getElementById('pads-left-meter');
+const turretsLeftEl = document.getElementById('turrets-left');
 const gameContainer = document.getElementById('game-container');
 
 // Game state
-let player, topTerrain, bottomTerrain, landingPads;
+let player, topTerrain, bottomTerrain, landingPads, obstacles; // internal cave walls as obstacles
+let chamberXs = []; // legacy
+let mazeDeadEnds = [];
+let mazeMeta = null;
+let obstaclesPolys = []; // precomputed jagged polygons for drawing (rects kept for collision)
 let keys = {};
 let gameState = 'start';
 let animationFrameId;
-let padsLeft = 3;
+let padsLeft = 5;
+let turrets = [];
+let bullets = [];
+let enemyBullets = [];
+let playerShootCooldown = 0;
+let turretsLeft = 0;
+// Power-ups & effects
+let powerUps = [];
+let PU_SPAWN_COOLDOWN = 0; // frames until next spawn
+let shieldFrames = 0, bubbleFrames = 0, homingFrames = 0, sizeFrames = 0, bouncyFrames = 0;
+let currentPower = null;
+let playerExtraHP = 0; // extra hits while size increase is active
+const MAX_POWERUPS = 90; // hard cap: always maintain this many active pickups
+// Explosion & overlay state
+let explosionParticles = [];
+let shockwaves = [];
+let explosionFrames = 0;
+let shake = 0;
+let frameCount = 0;
+let overlay = null;
+let overlayLetterBursts = [];
 
 // --- World and Camera ---
-const world = { width: 8000, height: 1500 };
-const camera = { x: 0, y: 0, width: canvas.width, height: canvas.height };
+const world = { width: 20000, height: 7000 }; // expanded labyrinth world // expanded world for exploration labyrinth // large handcrafted world
+const camera = { x: 0, y: 0 };
 
 // --- Terrain Generation ---
-function generateTerrainPath(isTop) {
-    const path = [];
-    const segments = 200;
-    const roughness = 0.2;
-    let lastY = isTop ? world.height * 0.4 : world.height * 0.6;
+const MIN_GAP = 260;   // minimum vertical clearance
+const MAX_GAP = 360;   // max clearance (adds variety)
+const SEGMENTS = 420;  // more detail for complex/maze-like shapes
+// Seeded RNG so the maze is stable across runs
+let RNG_SEED = 987654321;
+function srand(s){ RNG_SEED = (s>>>0) || 1; }
+function frand(){ RNG_SEED = (RNG_SEED*1664525 + 1013904223)>>>0; return ((RNG_SEED>>>8)&0xFFFFFF)/0x1000000; }
 
-    for (let i = 0; i <= segments; i++) {
-        const x = (world.width / segments) * i;
-        const yOffset = (Math.random() - 0.5) * (world.height * roughness);
-        const y = lastY + yOffset;
-        lastY = y;
-        path.push({ x, y });
+function generateCavePaths() {
+    // Wide open cavern bounds; the maze is formed by internal walls (obstacles)
+    const top = []; const bottom = [];
+    const W = world.width, H = world.height;
+    for (let i = 0; i <= SEGMENTS; i++) {
+        const x = (W / SEGMENTS) * i;
+        const t = i / SEGMENTS;
+        const topY = 140 + 40 * Math.sin(t * Math.PI * 2 * 0.6);
+        const botY = H - 140 + 40 * Math.sin(t * Math.PI * 2 * 0.55 + 1.3);
+        top.push({ x, y: topY });
+        bottom.push({ x, y: botY });
     }
-    return path;
+    topTerrain = top; bottomTerrain = bottom;
 }
 
 function drawTerrain(ctx, terrainPath, isTop) {
     ctx.beginPath();
     ctx.moveTo(terrainPath[0].x, terrainPath[0].y);
-    for (let i = 1; i < terrainPath.length; i++) {
-        ctx.lineTo(terrainPath[i].x, terrainPath[i].y);
-    }
-    if (isTop) {
-        ctx.lineTo(world.width, 0);
-        ctx.lineTo(0, 0);
-    } else {
-        ctx.lineTo(world.width, world.height);
-        ctx.lineTo(0, world.height);
-    }
+    for (let i = 1; i < terrainPath.length; i++) ctx.lineTo(terrainPath[i].x, terrainPath[i].y);
+    if (isTop) { ctx.lineTo(world.width, 0); ctx.lineTo(0, 0); }
+    else { ctx.lineTo(world.width, world.height); ctx.lineTo(0, world.height); }
     ctx.closePath();
+    ctx.fillStyle = '#4a4b5c'; ctx.fill();
+    ctx.strokeStyle = '#6a6b7c'; ctx.lineWidth = 3; ctx.stroke();
+}
+
+// --- Obstacles (maze made of internal cave walls) ---
+function buildMazeGraph() {
+  const W = world.width, H = world.height;
+  const margin = 320;
+  const COLS = 22, ROWS = 12;
+  const cellW = Math.floor((W - margin * 2) / COLS);
+  const cellH = Math.floor((H - margin * 2) / ROWS);
+  const wallT = 120; // wall thickness
+
+  // Cells with openings N,S,E,W (false = wall present)
+  const cells = Array.from({ length: ROWS }, (_, r) =>
+    Array.from({ length: COLS }, (_, c) => ({ r, c, v: false, N: false, S: false, E: false, W: false }))
+  );
+
+  function neighbors(r, c) {
+    const list = [];
+    if (r > 0) list.push(cells[r - 1][c]);
+    if (r < ROWS - 1) list.push(cells[r + 1][c]);
+    if (c > 0) list.push(cells[r][c - 1]);
+    if (c < COLS - 1) list.push(cells[r][c + 1]);
+    return list;
+  }
+
+  // DFS maze (spanning tree)
+  const sr = Math.floor(Math.random() * ROWS);
+  const sc = Math.floor(Math.random() * COLS);
+  const stack = [cells[sr][sc]];
+  cells[sr][sc].v = true;
+  while (stack.length) {
+    const cur = stack[stack.length - 1];
+    const nbs = neighbors(cur.r, cur.c).filter(nb => !nb.v);
+    if (!nbs.length) { stack.pop(); continue; }
+    const nb = nbs[Math.floor(Math.random() * nbs.length)];
+    if (nb.r < cur.r) { cur.N = true; nb.S = true; }
+    else if (nb.r > cur.r) { cur.S = true; nb.N = true; }
+    else if (nb.c < cur.c) { cur.W = true; nb.E = true; }
+    else if (nb.c > cur.c) { cur.E = true; nb.W = true; }
+    nb.v = true; stack.push(nb);
+  }
+
+  // Add loops and chambers (remove some random walls)
+  for (let k = 0; k < COLS * ROWS * 0.22; k++) {
+    const r = Math.floor(Math.random() * ROWS);
+    const c = Math.floor(Math.random() * COLS);
+    const dir = Math.floor(Math.random() * 4);
+    const cell = cells[r][c];
+    if (dir === 0 && r > 0) { cell.N = true; cells[r - 1][c].S = true; }
+    if (dir === 1 && r < ROWS - 1) { cell.S = true; cells[r + 1][c].N = true; }
+    if (dir === 2 && c > 0) { cell.W = true; cells[r][c - 1].E = true; }
+    if (dir === 3 && c < COLS - 1) { cell.E = true; cells[r][c + 1].W = true; }
+  }
+  // carve a few larger chambers by clearing 2x2 blocks
+  for (let k = 0; k < 6; k++) {
+    const r0 = 1 + Math.floor(Math.random() * (ROWS - 2));
+    const c0 = 1 + Math.floor(Math.random() * (COLS - 2));
+    const cells2 = [cells[r0][c0], cells[r0+1][c0], cells[r0][c0+1], cells[r0+1][c0+1]];
+    cells2[0].E = cells2[1].E = cells2[2].E = cells2[3].E = true;
+    cells2[0].S = cells2[1].S = cells2[2].S = cells2[3].S = true;
+    cells2[0].W = cells2[1].W = cells2[2].W = cells2[3].W = true;
+    cells2[0].N = cells2[1].N = cells2[2].N = cells2[3].N = true;
+  }
+
+  // Convert remaining walls to obstacle rectangles (only build N and W to avoid duplicates)
+  const obstaclesRects = [];
+  function addRect(x, y, w, h){ obstaclesRects.push({ x, y, w, h }); }
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x0 = margin + c * cellW;
+      const y0 = margin + r * cellH;
+      const cell = cells[r][c];
+      if (!cell.N) addRect(x0, y0 - wallT / 2, cellW, wallT);
+      if (!cell.W) addRect(x0 - wallT / 2, y0, wallT, cellH);
+      // outer boundary E/S walls for outermost cells
+      if (c === COLS - 1 && !cell.E) addRect(x0 + cellW - wallT / 2, y0, wallT, cellH);
+      if (r === ROWS - 1 && !cell.S) addRect(x0, y0 + cellH - wallT / 2, cellW, wallT);
+    }
+  }
+
+  // Dead-end centers for pad placement
+  const deadEnds = [];
+  const centers = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const cell = cells[r][c];
+      const deg = (cell.N?1:0)+(cell.S?1:0)+(cell.E?1:0)+(cell.W?1:0);
+      const cx = margin + c * cellW + cellW/2;
+      const cy = margin + r * cellH + cellH/2;
+      centers.push({x:cx,y:cy,deg});
+      if (deg === 1) deadEnds.push({x:cx,y:cy});
+    }
+  }
+  return { obstaclesRects, deadEnds, meta: { margin, COLS, ROWS, cellW, cellH, wallT, centers } };
+}
+
+function generateObstacles() {
+  const maze = buildMazeGraph();
+  obstacles = maze.obstaclesRects;
+  mazeDeadEnds = maze.deadEnds;
+  mazeMeta = maze.meta;
+  // Build jagged cave-style polygons for rendering (rects remain for collision)
+  obstaclesPolys = obstacles.map(o => makeJaggedPoly(o));
+}
+
+// --- Jagged cave wall helpers ---
+function makeJaggedPoly(o){
+  const nx = Math.max(3, Math.round(o.w / 140));
+  const ny = Math.max(2, Math.round(o.h / 140));
+  const A  = Math.min(40, Math.max(14, Math.min(o.w, o.h) * 0.25)); // jitter amplitude
+  const seedBase = o.x*0.013 + o.y*0.017 + o.w*0.019 + o.h*0.023;
+  function randFor(k){ const s = Math.sin(k) * 43758.5453123; return s - Math.floor(s); }
+  function jv(k){ return (randFor(seedBase + k*12.7) * 2 - 1) * A; } // vertical jitter
+  function jh(k){ return (randFor(seedBase + k*9.9)  * 2 - 1) * A; } // horizontal jitter
+  const pts = [];
+  // top edge
+  for (let i=0;i<=nx;i++){ const t=i/nx; const x=o.x + t*o.w; const y=o.y + jv(i); pts.push({x,y}); }
+  // right edge
+  for (let j=1;j<=ny;j++){ const t=j/ny; const x=o.x + o.w + jh(j); const y=o.y + t*o.h; pts.push({x,y}); }
+  // bottom edge
+  for (let i=nx;i>=0;i--){ const t=i/nx; const x=o.x + t*o.w; const y=o.y + o.h + jv(1000+i); pts.push({x,y}); }
+  // left edge
+  for (let j=ny;j>=1;j--){ const t=j/ny; const x=o.x + jh(2000+j); const y=o.y + t*o.h; pts.push({x,y}); }
+  return pts;
+}
+
+function drawObstacles(ctx) {
+  if (obstaclesPolys && obstaclesPolys.length) {
+    for (const poly of obstaclesPolys) {
+      ctx.beginPath();
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let k=1;k<poly.length;k++) ctx.lineTo(poly[k].x, poly[k].y);
+      ctx.closePath();
+      ctx.fillStyle = '#4a4b5c';
+      ctx.fill();
+      ctx.strokeStyle = '#6a6b7c';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  } else {
+    // Fallback to rectangles if polys missing
     ctx.fillStyle = '#4a4b5c';
-    ctx.fill();
-    ctx.strokeStyle = '#6a6b7c';
-    ctx.lineWidth = 3;
-    ctx.stroke();
+    for (const o of obstacles) ctx.fillRect(o.x, o.y, o.w, o.h);
+    ctx.strokeStyle = '#6a6b7c'; ctx.lineWidth = 2;
+    for (const o of obstacles) ctx.strokeRect(o.x, o.y, o.w, o.h);
+  }
+}
+
+function pointInObstacle(x, y) {
+  for (const o of obstacles) { if (x >= o.x && x <= o.x + o.w && y >= o.y && y <= o.y + o.h) return true; }
+  return false;
 }
 
 // --- Player Class ---
@@ -163,7 +286,6 @@ class Player {
         this.isThrusting = false;
         this.visible = true;
     }
-
     getVertices() {
         const vertices = [];
         const angle = this.angle + Math.PI / 2;
@@ -174,9 +296,22 @@ class Player {
         vertices.push({ x: this.x + ((this.width / 2) * cos - (this.height / 2) * sin), y: this.y + ((this.width / 2) * sin + (this.height / 2) * cos) });
         return vertices;
     }
-
     draw(ctx) {
         if (!this.visible) return;
+
+        // If size power-up is active, draw 4 ghost triangles around the main ship
+        if (sizeFrames > 0) {
+            const offs = [ [-18,0], [18,0], [0,-18], [0,18] ];
+            ctx.save();
+            ctx.globalAlpha = 0.5;
+            for (const [ox,oy] of offs){
+                ctx.save(); ctx.translate(this.x+ox, this.y+oy); ctx.rotate(this.angle + Math.PI/2);
+                ctx.beginPath(); ctx.moveTo(0, -this.height / 2); ctx.lineTo(-this.width / 2, this.height / 2); ctx.lineTo(this.width / 2, this.height / 2); ctx.closePath();
+                ctx.fillStyle = '#5dade2'; ctx.fill(); ctx.restore();
+            }
+            ctx.restore();
+        }
+
         ctx.save();
         ctx.translate(this.x, this.y);
         ctx.rotate(this.angle + Math.PI / 2);
@@ -187,7 +322,6 @@ class Player {
         ctx.closePath();
         ctx.fillStyle = '#3498db';
         ctx.fill();
-
         if (this.isThrusting) {
             ctx.beginPath();
             ctx.moveTo(0, this.height / 2);
@@ -198,163 +332,354 @@ class Player {
             ctx.fill();
         }
         ctx.restore();
-    }
 
+        // Shield ring visual
+        if (shieldFrames > 0) {
+            ctx.save();
+            ctx.globalAlpha = 0.6;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 22, 0, Math.PI*2);
+            ctx.strokeStyle = '#7ed6df';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
     update() {
         if (!this.visible) return;
-        if (keys['ArrowLeft']) { this.angle -= this.rotationSpeed; }
-        if (keys['ArrowRight']) { this.angle += this.rotationSpeed; }
-
+        if (keys['ArrowLeft']) this.angle -= this.rotationSpeed;
+        if (keys['ArrowRight']) this.angle += this.rotationSpeed;
         this.isThrusting = false;
         if (keys['ArrowUp']) {
             this.dx += Math.cos(this.angle) * this.thrust;
             this.dy += Math.sin(this.angle) * this.thrust;
             this.isThrusting = true;
         }
-
-        this.dx *= this.friction;
-        this.dy *= this.friction;
-        
-        this.x += this.dx;
-        this.y += this.dy;
+        this.dx *= this.friction; this.dy *= this.friction;
+        this.x += this.dx; this.y += this.dy;
     }
-    
     respawn() {
         const safeSpot = findSafeSpawnPoint();
-        this.x = safeSpot.x;
-        this.y = safeSpot.y;
-        this.dx = 0;
-        this.dy = 0;
-        this.angle = 0;
+        this.x = safeSpot.x; this.y = safeSpot.y; this.dx = 0; this.dy = 0; this.angle = 0;
     }
 }
 
 // --- Landing Pad Class ---
 class LandingPad {
-    constructor(x, y) {
-        this.x = x; this.y = y;
-        this.width = 100; this.height = 10;
-        this.landed = false;
-    }
+    constructor(x, y) { this.x = x; this.y = y; this.width = 160; this.height = 10; this.landed = false; }
     draw(ctx) {
-        ctx.fillStyle = '#95a5a6';
-        ctx.fillRect(this.x, this.y, this.width, this.height);
-
+        ctx.fillStyle = '#95a5a6'; ctx.fillRect(this.x, this.y, this.width, this.height);
         ctx.save();
-        const lightSize = 8;
-        const alpha = 0.6 + Math.sin(Date.now() / 200) * 0.4;
-        ctx.globalAlpha = this.landed ? 1.0 : alpha;
-        ctx.fillStyle = this.landed ? '#2ecc71' : '#e74c3c';
-        
-        ctx.beginPath();
-        ctx.arc(this.x - lightSize, this.y + this.height / 2, lightSize, 0, Math.PI * 2);
-        ctx.fill();
-        
-        ctx.beginPath();
-        ctx.arc(this.x + this.width + lightSize, this.y + this.height / 2, lightSize, 0, Math.PI * 2);
-        ctx.fill();
-        
+        const lightSize = 8; const alpha = 0.6 + Math.sin(Date.now() / 200) * 0.4;
+        ctx.globalAlpha = this.landed ? 1.0 : alpha; ctx.fillStyle = this.landed ? '#2ecc71' : '#e74c3c';
+        ctx.beginPath(); ctx.arc(this.x - lightSize, this.y + this.height / 2, lightSize, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(this.x + this.width + lightSize, this.y + this.height / 2, lightSize, 0, Math.PI * 2); ctx.fill();
         ctx.restore();
     }
 }
 
+// --- Turrets & Shooting (injected) ---
+class Turret { constructor(x,y){ this.x=x; this.y=y; this.cooldown=0; this.alive=true; } }
+function drawTurrets(ctx){
+  for (const t of turrets){ if (!t.alive) continue; const ang = Math.atan2(player.y - t.y, player.x - t.x);
+    ctx.save(); ctx.translate(t.x, t.y);
+    ctx.beginPath(); ctx.arc(0,0,12,0,Math.PI*2); ctx.fillStyle = '#7f8c8d'; ctx.fill();
+    ctx.lineWidth = 4; ctx.strokeStyle = '#bdc3c7'; ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(Math.cos(ang)*18, Math.sin(ang)*18); ctx.stroke();
+    ctx.restore(); }
+}
+function isPointFlyable(x,y){ const tY=getTerrainYAtX(x, topTerrain); const bY=getTerrainYAtX(x, bottomTerrain); if (y < tY+6 || y > bY-6) return false; if (pointInObstacle(x,y)) return false; return true; }
+function hasLineOfSight(x1,y1,x2,y2,step){ const dx=x2-x1, dy=y2-y1; const dist=Math.hypot(dx,dy); const steps=Math.max(1, Math.ceil(dist/(step||30))); for(let i=1;i<=steps;i++){ const t=i/steps; const x=x1+dx*t, y=y1+dy*t; const tY=getTerrainYAtX(x, topTerrain), bY=getTerrainYAtX(x, bottomTerrain); if (y < tY || y > bY) return false; if (pointInObstacle(x,y)) return false; } return true; }
+function generateTurrets(count){ turrets = []; const MIN_D = 1800; function farEnough(x,y,list,minD){ return list.every(t => Math.hypot(t.x - x, t.y - y) > minD); } function farFromPads(x,y){ return landingPads.every(p => Math.hypot((p.x + p.width/2) - x, (p.y) - y) > 1200); } if (mazeMeta && mazeMeta.centers){ const src = mazeMeta.centers.filter(c => c.deg >= 3).slice(); const tj = mazeMeta.centers.filter(c => c.deg === 2); for (let i=0;i<tj.length;i+=3) src.push(tj[i]); for (let i=src.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [src[i],src[j]]=[src[j],src[i]]; } for (const c of src){ if (turrets.length >= count) break; const x=c.x, y=c.y; if (!isPointFlyable(x,y)) continue; if (!farEnough(x,y,turrets,MIN_D)) continue; if (!farFromPads(x,y)) continue; turrets.push(new Turret(x,y)); } } let tries=0; while (turrets.length < count && tries < 200){ const x = 400 + Math.random()*(world.width-800); const y = 400 + Math.random()*(world.height-800); if (isPointFlyable(x,y) && farEnough(x,y,turrets,MIN_D) && farFromPads(x,y)) turrets.push(new Turret(x,y)); tries++; } }
+function handlePlayerShooting(){ 
+  if (playerShootCooldown>0) playerShootCooldown--;
+  if (!keys['Space'] || playerShootCooldown>0) return;
+  const count = (sizeFrames>0) ? 5 : 1;
+  const spread = (sizeFrames>0) ? 0.18 : 0.0;
+  const baseAng = player.angle;
+  const nose = getPlayerVertices(player)[0];
+  for (let i=0;i<count;i++){
+    const t = (count===1) ? 0 : (i/(count-1) - 0.5);
+    const ang = baseAng + t*spread;
+    const sp = 11.5;
+    const vx = Math.cos(ang)*sp + player.dx*0.2;
+    const vy = Math.sin(ang)*sp + player.dy*0.2;
+    const bullet = { x:nose.x, y:nose.y, vx, vy, life:480, r:3, type:'normal', homing:false, bouncesLeft:0, age:0 };
+    if (bubbleFrames>0){ bullet.type='bubble'; bullet.r=14; bullet.life=720; bullet.phase = Math.random()*Math.PI*2; }
+    else if (bouncyFrames>0){ bullet.type='bouncy'; bullet.r=4; bullet.bouncesLeft=5; }
+    if (homingFrames>0 && bullet.type==='normal') bullet.homing = true;
+    bullets.push(bullet);
+  }
+  playerShootCooldown = 10;
+}
+
+function drawBullets(ctx){
+  // Player bullets
+  for (const b of bullets){
+    if (b.type==='bubble'){
+      ctx.save();
+      // soft translucent fill
+      ctx.globalAlpha = 0.35; ctx.fillStyle = '#9ad0ff';
+      ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill();
+      // glossy edge + highlight
+      ctx.globalAlpha = 1.0; ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(b.x - b.r*0.4, b.y - b.r*0.4, b.r*0.3, 0, Math.PI*2); ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    ctx.beginPath();
+    if (b.type==='bouncy'){ ctx.globalAlpha = 1.0; ctx.fillStyle = '#e67e22'; }
+    else { ctx.globalAlpha = 1.0; ctx.fillStyle = '#f1c40f'; }
+    ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+  }
+  // Enemy bullets
+  ctx.fillStyle='#e74c3c';
+  for (const b of enemyBullets){ ctx.beginPath(); ctx.arc(b.x,b.y,3,0,Math.PI*2); ctx.fill(); }
+}
+
+function updateTurrets(){
+  for (const t of turrets){
+    if(!t.alive) continue;
+    if (t.cooldown>0) t.cooldown--;
+    const dx=player.x - t.x, dy=player.y - t.y;
+    const d=Math.hypot(dx,dy);
+    if (d < 1800 && hasLineOfSight(t.x,t.y, player.x, player.y, 36)){
+      if (t.cooldown<=0){
+        const sp=8.0; const vx=dx/d*sp, vy=dy/d*sp;
+        enemyBullets.push({x:t.x, y:t.y, vx, vy, life:360});
+        t.cooldown = 45 + Math.floor(Math.random()*45);
+      }
+    }
+  }
+}
+
+function updateBullets(){
+  // Player bullets
+  for (let i=bullets.length-1;i>=0;i--){
+    const b=bullets[i]; b.age = (b.age||0) + 1;
+    if (b.homing){
+      let best=null, bestd=1e9;
+      for (const t of turrets){ if (!t.alive) continue; const d=Math.hypot(t.x-b.x,t.y-b.y); if (d<bestd){ best=t; bestd=d; } }
+      if (best){
+        const ax=(best.x-b.x)/Math.max(1,bestd), ay=(best.y-b.y)/Math.max(1,bestd);
+        b.vx += ax*0.4; b.vy += ay*0.4;
+        const sp=Math.hypot(b.vx,b.vy); const maxS=13; if (sp>maxS){ b.vx*=maxS/sp; b.vy*=maxS/sp; }
+      }
+    }
+    if (b.type==='bubble'){
+      // stronger buoyancy + gentle wobble to feel like a bubble
+      b.vy -= 0.22; if (b.vy < -2.6) b.vy = -2.6; // float up, limit rise rate
+      b.vx *= 0.992; // slight drag
+      b.vx += 0.12 * Math.sin((b.phase||0) + b.age * 0.08); // side-to-side drift
+    }
+    b.x+=b.vx; b.y+=b.vy; b.life--;
+    if (b.type==='bouncy' && !isPointFlyable(b.x,b.y)){
+      const canBackX = isPointFlyable(b.x - b.vx, b.y);
+      const canBackY = isPointFlyable(b.x, b.y - b.vy);
+      if (!canBackX) b.vx = -b.vx;
+      if (!canBackY) b.vy = -b.vy;
+      b.bouncesLeft--;
+      b.x+=b.vx*0.5; b.y+=b.vy*0.5;
+      if (b.bouncesLeft<=0){
+        const pieces=14; const speed=7;
+        for (let k=0;k<pieces;k++){ const th = (Math.PI*2)*k/pieces; bullets.push({x:b.x,y:b.y,vx:Math.cos(th)*speed,vy:Math.sin(th)*speed,life:60,r:2,type:'normal',homing:false,bouncesLeft:0}); }
+        bullets.splice(i,1); continue;
+      }
+    }
+    if (b.life<=0 || !isPointFlyable(b.x,b.y)){ bullets.splice(i,1); continue; }
+    let hitIndex=-1;
+    for (let ti=0; ti<turrets.length; ti++){
+      const t = turrets[ti]; if (!t.alive) continue;
+      const rad = (b.type==='bubble' ? Math.max(12, b.r*0.85) : 16);
+      if (Math.hypot(b.x - t.x, b.y - t.y) < rad){ hitIndex=ti; break; }
+    }
+    if (hitIndex>=0){
+      const t = turrets[hitIndex];
+      if (b.type==='bubble'){ t.bubbleHits = (t.bubbleHits||0) + 1; if (t.bubbleHits>=3){ t.alive=false; turretsLeft--; if (turretsLeftEl) turretsLeftEl.textContent = 'Turrets: ' + turretsLeft; } }
+      else { t.alive=false; turretsLeft--; if (turretsLeftEl) turretsLeftEl.textContent = 'Turrets: ' + turretsLeft; }
+      bullets.splice(i,1); continue;
+    }
+  }
+  // Enemy bullets
+  for (let i=enemyBullets.length-1;i>=0;i--){
+    const b=enemyBullets[i]; b.x+=b.vx; b.y+=b.vy; b.life--;
+    if (b.life<=0 || !isPointFlyable(b.x,b.y)){ enemyBullets.splice(i,1); continue; }
+    if (Math.hypot(b.x - player.x, b.y - player.y) < 12){
+      if (shieldFrames>0){ enemyBullets.splice(i,1); continue; }
+      if (playerExtraHP>0){ playerExtraHP--; enemyBullets.splice(i,1); continue; }
+      endGame(false); return;
+    }
+  }
+}
+
 // --- Game Initialization ---
 function init() {
-    topTerrain = generateTerrainPath(true);
-    bottomTerrain = generateTerrainPath(false);
-    
-    const startPos = findSafeSpawnPoint();
-    player = new Player(startPos.x, startPos.y);
-    
-    landingPads = findAndPlaceLandingPads(3);
-    padsLeft = landingPads.length;
-    padsLeftMeterEl.textContent = `Pads Left: ${padsLeft}`;
-
-    startScreen.style.display = 'none';
-    endScreen.style.display = 'none';
+    generateCavePaths();
+    generateObstacles();
+    landingPads = findAndPlaceLandingPads(5);
+    generateTurrets(15);
+    bullets = []; enemyBullets = [];
+    powerUps = []; PU_SPAWN_COOLDOWN = 90; // first spawn ~1.5s
+    shieldFrames=bubbleFrames=homingFrames=sizeFrames=bouncyFrames=0; playerExtraHP=0;
+    turretsLeft = turrets.length; if (turretsLeftEl) turretsLeftEl.textContent = 'Turrets: ' + turretsLeft;
+    const start = landingPads.length
+        ? { x: landingPads[0].x + landingPads[0].width * 0.5, y: landingPads[0].y - 80 }
+        : findSafeSpawnPoint();
+    player = new Player(start.x, start.y);
+    // Guaranteed starter power-up near the lander
+    spawnPowerUpNear(player.x, player.y, 140);
+    // Top-up immediately to the target count so there are always MAX_POWERUPS present
+    while (powerUps.length < MAX_POWERUPS) spawnPowerUp();
+    padsLeft = landingPads.length; padsLeftMeterEl.textContent = `Pads Left: ${padsLeft}`;
+    startScreen.style.display = 'none'; endScreen.style.display = 'none';
     gameState = 'playing';
     gameLoop();
 }
 
 // --- Game Loop ---
 function gameLoop() {
-    if (gameState !== 'playing') return;
+    if (gameState !== 'playing' && gameState !== 'exploding') return;
     animationFrameId = requestAnimationFrame(gameLoop);
-    
-    player.update();
-
-    if (checkPlayerWallCollision(player)) {
-        endGame(false);
+    frameCount++;
+    if (gameState === 'exploding') {
+        updateExplosion();
+        render();
         return;
     }
 
-    landingPads.forEach(pad => {
-        if (!pad.landed && checkCollision(player, pad)) {
-            if (checkLanding(player, pad)) {
-                pad.landed = true;
-                padsLeft--;
-                padsLeftMeterEl.textContent = `Pads Left: ${padsLeft}`;
-                if (padsLeft === 0) {
-                    endGame(true);
-                }
-            } else {
-                endGame(false);
-            }
+    player.update();
+    handlePlayerShooting();
+    updateTurrets();
+    updateBullets();
+    updatePowerUps();
+    applyTractorBeam(player);
+
+    // Handle pads first so base-first contact can land before wall checks
+    for (const pad of landingPads) {
+        if (pad.landed) continue;
+        if (checkCollision(player, pad)) {
+            if (noseFacingPad(player, pad)) { endGame(false); return; }
+            if (checkLanding(player, pad) || canSoftLand(player, pad) || baseFacingPad(player, pad)) {
+                forceSnapLand(player, pad);
+                pad.landed = true; padsLeft--; padsLeftMeterEl.textContent = `Pads Left: ${padsLeft}`;
+                if (padsLeft === 0) { endGame(true); return; }
+            } else { endGame(false); return; }
         }
-    });
-    
+    }
+
+    // Then apply wall collisions
+    if (checkPlayerWallCollision(player)) { endGame(false); return; }
+
     render();
 }
 
 function render() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    camera.x = player.x - canvas.width / 4;
-    camera.y = player.y - canvas.height / 2;
-    if (camera.x < 0) camera.x = 0;
-    if (camera.y < 0) camera.y = 0;
+    camera.x = player.x - canvas.width / 4; camera.y = player.y - canvas.height / 2;
+    if (camera.x < 0) camera.x = 0; if (camera.y < 0) camera.y = 0;
     if (camera.x > world.width - canvas.width) camera.x = world.width - canvas.width;
     if (camera.y > world.height - canvas.height) camera.y = world.height - canvas.height;
-
-    ctx.save();
-    ctx.translate(-camera.x, -camera.y);
-
-    drawTerrain(ctx, topTerrain, true);
-    drawTerrain(ctx, bottomTerrain, false);
+    const sx = (shake>0 ? (Math.random()-0.5)*shake : 0);
+    const sy = (shake>0 ? (Math.random()-0.5)*shake : 0);
+    ctx.save(); ctx.translate(-camera.x + sx, -camera.y + sy);
+    drawTerrain(ctx, topTerrain, true); drawTerrain(ctx, bottomTerrain, false); drawObstacles(ctx);
     landingPads.forEach(pad => pad.draw(ctx));
-    player.draw(ctx);
-
+    drawPowerUps(ctx);
+    drawTurrets(ctx); drawBullets(ctx); player.draw(ctx);
+    drawExplosion(ctx);
     ctx.restore();
+    drawPowerOverlay(ctx);
 }
 
 // --- Helper Functions ---
 function getPlayerVertices(p) {
-    const vertices = [];
-    const angle = p.angle + Math.PI / 2;
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-    vertices.push({ x: p.x + (0 * cos - (-p.height / 2) * sin), y: p.y + (0 * sin + (-p.height / 2) * cos) });
-    vertices.push({ x: p.x + ((-p.width / 2) * cos - (p.height / 2) * sin), y: p.y + ((-p.width / 2) * sin + (p.height / 2) * cos) });
-    vertices.push({ x: p.x + ((p.width / 2) * cos - (p.height / 2) * sin), y: p.y + ((p.width / 2) * sin + (p.height / 2) * cos) });
-    return vertices;
+    const angle = p.angle + Math.PI / 2; const cos = Math.cos(angle); const sin = Math.sin(angle);
+    return [
+        { x: p.x + (0 * cos - (-p.height / 2) * sin), y: p.y + (0 * sin + (-p.height / 2) * cos) },
+        { x: p.x + ((-p.width / 2) * cos - (p.height / 2) * sin), y: p.y + ((-p.width / 2) * sin + (p.height / 2) * cos) },
+        { x: p.x + ((p.width / 2) * cos - (p.height / 2) * sin), y: p.y + ((p.width / 2) * sin + (p.height / 2) * cos) },
+    ];
 }
 
-function checkPlayerWallCollision(p) {
-    const vertices = getPlayerVertices(p);
-    for (const vertex of vertices) {
-        const topY = getTerrainYAtX(vertex.x, topTerrain);
-        const bottomY = getTerrainYAtX(vertex.x, bottomTerrain);
-        if (vertex.y < topY || vertex.y > bottomY) {
-            return true;
-        }
+// Assistive Landing / Tractor Beam
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function getBaseCenter(p){ const v = getPlayerVertices(p); return { x:(v[1].x+v[2].x)/2, y:(v[1].y+v[2].y)/2 }; }
+function baseFacingPad(player, pad){
+    // Is the ship's BASE (opposite the nose) pointing toward the pad?
+    const nx = Math.cos(player.angle), ny = Math.sin(player.angle); // nose dir
+    const bx = -nx, by = -ny; // base dir
+    const base = getBaseCenter(player);
+    const toPadX = (pad.x + pad.width/2) - base.x; const toPadY = pad.y - base.y;
+    const len = Math.hypot(toPadX, toPadY) || 1;
+    const dot = (bx*toPadX + by*toPadY) / len; // cosine of angle between base and pad vector
+    return dot > 0.18; // wider base-facing cone (~80°)
+}
+function noseFacingPad(player, pad){
+    const nx = Math.cos(player.angle), ny = Math.sin(player.angle);
+    const base = getBaseCenter(player);
+    const toPadX = (pad.x + pad.width/2) - base.x; const toPadY = pad.y - base.y;
+    const len = Math.hypot(toPadX, toPadY) || 1;
+    const dot = (nx*toPadX + ny*toPadY) / len;
+    return dot > 0.7; // only very clear nose-first counts as crash
+}
+function forceSnapLand(player, pad){
+    const base = getBaseCenter(player);
+    const padCx = pad.x + pad.width/2;
+    player.x += (padCx - base.x) * 0.7; player.y += (pad.y - base.y) * 0.7;
+    player.dx = 0; player.dy = 0; player.angle = -Math.PI/2;
+}
+
+function applyTractorBeam(player){
+    // Light assist only when BASE faces pad and within ~one lander length
+    const landerLen = Math.hypot(player.width, player.height);
+    for(const pad of landingPads){ if(pad.landed) continue;
+        const base = getBaseCenter(player);
+        const padCx = pad.x + pad.width/2;
+        const dx = padCx - base.x; const dy = pad.y - base.y; // >0 means pad is below the base
+        if (dy <= 0 || dy > landerLen * 1.65) continue; // vertical window
+        if (Math.abs(dx) > pad.width * 1.1) continue;    // horizontal window
+        if (!baseFacingPad(player, pad)) continue;       // orientation
+        const strength = 1 - (dy / (landerLen * 1.65));   // 0..1
+        player.dx += dx * 0.0012 * strength;             // center
+        player.dy += dy * 0.0020 * strength;             // descend
+        const target = -Math.PI/2;                       // auto-level a touch
+        let diff = target - player.angle; if (diff > Math.PI) diff -= 2*Math.PI; if (diff < -Math.PI) diff += 2*Math.PI;
+        player.angle += diff * 0.05 * strength;
+        const damp = 1 - 0.004 * strength; player.dx *= damp; player.dy *= damp;
+    }
+}
+function canSoftLand(player, pad){
+    if (!baseFacingPad(player, pad)) return false;
+    const base = getBaseCenter(player);
+    const overPadX = base.x > pad.x && base.x < pad.x + pad.width;
+    const nearY = Math.abs(base.y - pad.y) < 34; // more forgiving proximity
+    if (overPadX && nearY){
+        const padCx = pad.x + pad.width/2;
+        player.x += (padCx - base.x) * 0.5; player.y += (pad.y - base.y) * 0.5;
+        player.dx = 0; player.dy = 0; player.angle = -Math.PI/2;
+        return true;
     }
     return false;
 }
 
+function checkPlayerWallCollision(p) {
+    const vertices = getPlayerVertices(p);
+    for (const v of vertices) {
+        const topY = getTerrainYAtX(v.x, topTerrain);
+        const bottomY = getTerrainYAtX(v.x, bottomTerrain);
+        if (v.y < topY || v.y > bottomY) return true;
+        if (pointInObstacle(v.x, v.y)) return true;
+    }
+    return false;
+}
+
+
 function getTerrainYAtX(x, path) {
     for (let i = 0; i < path.length - 1; i++) {
-        const p1 = path[i];
-        const p2 = path[i+1];
+        const p1 = path[i]; const p2 = path[i+1];
         if (x >= p1.x && x <= p2.x) {
             const slope = (p2.y - p1.y) / (p2.x - p1.x);
             return p1.y + slope * (x - p1.x);
@@ -364,124 +689,323 @@ function getTerrainYAtX(x, path) {
 }
 
 function findSafeSpawnPoint() {
-    let safeX, safeY;
-    let isSafe = false;
-    let attempts = 0;
-    while (!isSafe && attempts < 100) {
-        safeX = 100;
-        safeY = world.height / 2;
+    let safeX = 100, safeY = world.height / 2, attempts = 0;
+    while (attempts < 100) {
         const topY = getTerrainYAtX(safeX, topTerrain);
         const bottomY = getTerrainYAtX(safeX, bottomTerrain);
-        if (bottomY - topY > 200) {
-            isSafe = true;
-        }
-        attempts++;
+        if (bottomY - topY > 200) break;
+        safeX += 50; attempts++;
     }
     return { x: safeX, y: safeY };
 }
 
 function findAndPlaceLandingPads(count) {
-    const pads = [];
-    const potentialSpots = [];
-    const padWidth = 100;
+  const pads = [];
+  const padW = 160, padH = 10;
+  const minDist = 3000;
 
-    for (let i = 10; i < bottomTerrain.length - 12; i++) {
-        const p1 = bottomTerrain[i];
-        const p2 = bottomTerrain[i+10];
-        const slope = Math.abs(p2.y - p1.y);
-        
-        if (slope < 10) { 
-            const midX = (p1.x + p2.x) / 2;
-            const topY = getTerrainYAtX(midX, topTerrain);
-            if (p1.y - topY > 300) {
-                potentialSpots.push({ x: p1.x, y: p1.y - 10, flatness: 1 / (slope + 1) });
-            }
-        }
-    }
+  // Prefer maze dead-ends first (exploration incentive)
+  const candidates = (mazeDeadEnds && mazeDeadEnds.length) ? mazeDeadEnds.slice() : [];
+  // Shuffle candidates
+  for (let i = candidates.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [candidates[i], candidates[j]] = [candidates[j], candidates[i]]; }
 
-    potentialSpots.sort((a, b) => b.flatness - a.flatness);
-    
-    const minDistance = 1500;
-    for(const spot of potentialSpots) {
-        if(pads.length >= count) break;
-        let isFarEnough = true;
-        for(const pad of pads) {
-            if(Math.abs(pad.x - spot.x) < minDistance) {
-                isFarEnough = false;
-                break;
-            }
-        }
-        if(isFarEnough) {
-            pads.push(new LandingPad(spot.x, spot.y));
-        }
+  function tryAddAt(cx, cy){
+    const xpad = cx - padW/2;
+    const ypad = cy + (mazeMeta ? Math.min(mazeMeta.cellH*0.25, 200) : 160);
+    if (isPadRectFlyable(xpad, ypad, padW, padH) && pads.every(p => Math.hypot((p.x+padW/2) - cx, (p.y) - ypad) > minDist)) {
+      pads.push(new LandingPad(xpad, ypad));
+      return true;
     }
-    return pads;
+    return false;
+  }
+
+  for (const p of candidates) { if (pads.length >= count) break; tryAddAt(p.x, p.y); }
+
+  // If still short, drop pads at high-degree intersections
+  if (mazeMeta && pads.length < count) {
+    const high = mazeMeta.centers.filter(c => c.deg >= 3);
+    for (const c of high) { if (pads.length >= count) break; tryAddAt(c.x, c.y); }
+  }
+
+  // Fallback: scan world for wide clear shelves
+  for (let scan = 400; pads.length < count && scan < world.width - padW; scan += 600) {
+    const cx = scan + padW/2; const tY = getTerrainYAtX(cx, topTerrain); const bY = getTerrainYAtX(cx, bottomTerrain);
+    const y = Math.min(bY - 170, (tY + bY) / 2 + 200);
+    const xpad = scan; const ypad = y;
+    if (isPadRectFlyable(xpad, ypad, padW, padH) && pads.every(p => Math.hypot((p.x+padW/2) - (xpad+padW/2), p.y - ypad) > minDist*0.8)) pads.push(new LandingPad(xpad, ypad));
+  }
+
+  return pads.slice(0, count);
 }
 
+function isPadRectFlyable(xpad, ypad, w, h){
+  // Check against cave ceiling/floor
+  for (let k = 0; k <= 12; k++) {
+    const x = xpad + (k/12)*w;
+    const tY = getTerrainYAtX(x, topTerrain);
+    const bY = getTerrainYAtX(x, bottomTerrain);
+    if (ypad < tY + 8 || ypad + h > bY - 8) return false;
+  }
+  // Check against internal walls
+  for (const o of obstacles) {
+    if (!(xpad + w < o.x || xpad > o.x + o.w || ypad + h < o.y || ypad > o.y + o.h)) return false;
+  }
+  return true;
+}
 
 function checkCollision(player, pad) {
-    const vertices = getPlayerVertices(player);
-    for (const v of vertices) {
-        if (v.x > pad.x && v.x < pad.x + pad.width && v.y > pad.y && v.y < pad.y + pad.height) {
-            return true;
-        }
-    }
+    const v = getPlayerVertices(player);
+    for (const p of v) if (p.x > pad.x && p.x < pad.x + pad.width && p.y > pad.y && p.y < pad.y + pad.height) return true;
     return false;
 }
 
 function checkLanding(player, pad) {
     const speed = Math.hypot(player.dx, player.dy);
-    if (speed > 1.5) return false;
-
+    if (speed > 4.2) return false; // allow faster touchdowns
     const targetAngle = -Math.PI / 2; 
     let angleDiff = Math.abs(player.angle - targetAngle);
     if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
-    if (angleDiff > 0.4) return false;
-
-    const vertices = getPlayerVertices(player);
-    const baseCenter = {
-        x: (vertices[1].x + vertices[2].x) / 2,
-        y: (vertices[1].y + vertices[2].y) / 2,
-    };
-    
-    return baseCenter.x > pad.x && baseCenter.x < pad.x + pad.width &&
-           baseCenter.y > pad.y && baseCenter.y < pad.y + 20;
+    if (angleDiff > 0.85) return false; // allow more tilt
+    const v = getPlayerVertices(player);
+    const baseCenter = { x: (v[1].x + v[2].x) / 2, y: (v[1].y + v[2].y) / 2 };
+    return baseCenter.x > pad.x && baseCenter.x < pad.x + pad.width && baseCenter.y > pad.y && baseCenter.y < pad.y + 30;
 }
 
 function endGame(isWin) {
-    gameState = 'over';
-    endMessageEl.textContent = isWin ? "You Win!" : "You Crashed!";
-    endScreen.style.display = 'flex';
-    cancelAnimationFrame(animationFrameId);
+    if (isWin) {
+        gameState = 'over'; endMessageEl.textContent = 'You Win!';
+        endScreen.style.display = 'flex'; cancelAnimationFrame(animationFrameId);
+        return;
+    }
+    // Crash: trigger cinematic explosion, then show game over
+    triggerCrashExplosion();
 }
 
 // --- Event Listeners ---
-window.addEventListener('keydown', (e) => {
-    keys[e.code] = true;
-});
-window.addEventListener('keyup', (e) => {
-    keys[e.code] = false;
-});
-
+window.addEventListener('keydown', (e) => { if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault(); keys[e.code] = true; });
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 startBtn.addEventListener('click', init);
 restartBtn.addEventListener('click', init);
 
 // Initial Setup
 function resizeCanvas() {
-    canvas.width = gameContainer.clientWidth;
-    canvas.height = gameContainer.clientHeight;
-    if(gameState === 'start') {
-        renderInitial();
-    }
+    canvas.width = gameContainer.clientWidth; canvas.height = gameContainer.clientHeight;
+    if (gameState === 'start') renderInitial();
 }
-
-function renderInitial() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-}
-
+function renderInitial() { ctx.clearRect(0, 0, canvas.width, canvas.height); }
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
+// Safety: surface JS errors so it's obvious why Start might not work
+window.addEventListener('error', (e) => {
+  console.error(e.error || e.message || e);
+  endMessageEl.textContent = 'Script error: ' + (e.message || 'unknown');
+  endScreen.style.display = 'flex';
+});// === Power-up system ===
+const POWER_TYPES = ['shield','bubble','homing','size','bouncy'];
+function randomFlyablePoint(){
+  for (let tries=0; tries<300; tries++){
+    const x = 300 + Math.random()*(world.width-600);
+    const y = 300 + Math.random()*(world.height-600);
+    if (!isPointFlyable(x,y)) continue;
+    if (!isPointFlyable(x+18,y) || !isPointFlyable(x-18,y) || !isPointFlyable(x,y+18) || !isPointFlyable(x,y-18)) continue;
+    return {x,y};
+  }
+  return { x: player.x + 200, y: player.y };
+}
+function spawnPowerUp(){
+  const p = randomFlyablePoint();
+  const type = POWER_TYPES[Math.floor(Math.random()*POWER_TYPES.length)];
+  powerUps.push({ type, x:p.x, y:p.y, ttl: 600 });
+}
+function spawnPowerUpNear(px, py, maxR=120){
+  // Always try to place one close to the player at game start
+  for (let tries=0; tries<80; tries++){
+    const th = Math.random()*Math.PI*2;
+    const r  = Math.random()*maxR;
+    const x = px + Math.cos(th)*r;
+    const y = py + Math.sin(th)*r;
+    if (!isPointFlyable(x,y)) continue;
+    if (!isPointFlyable(x+18,y) || !isPointFlyable(x-18,y) || !isPointFlyable(x,y+18) || !isPointFlyable(x,y-18)) continue;
+    const type = POWER_TYPES[Math.floor(Math.random()*POWER_TYPES.length)];
+    powerUps.push({ type, x, y, ttl: 600 });
+    return true;
+  }
+  // Fallback: spawn anywhere flyable
+  spawnPowerUp();
+  return false;
+}
+
+// Persistent power-ups: stays active until replaced by another pickup
+function setActivePower(type){
+  // clear all, then enable the requested one
+  shieldFrames = bubbleFrames = homingFrames = sizeFrames = bouncyFrames = 0;
+  playerExtraHP = 0;
+  currentPower = type;
+  if (type==='shield')       shieldFrames = 1e9;
+  else if (type==='bubble')  bubbleFrames  = 1e9;
+  else if (type==='homing')  homingFrames  = 1e9;
+  else if (type==='size')   { sizeFrames   = 1e9; playerExtraHP = 4; }
+  else if (type==='bouncy')  bouncyFrames  = 1e9;
+}
+
+function updatePowerUps(){
+  // Expire and collect
+  for (let i=powerUps.length-1;i>=0;i--){
+    const p = powerUps[i];
+    p.ttl--; if (p.ttl<=0){ powerUps.splice(i,1); continue; }
+    if (Math.hypot(p.x - player.x, p.y - player.y) < 20){
+      setActivePower(p.type); triggerPowerOverlay(p.type); // stays until replaced by another pickup
+      powerUps.splice(i,1);
+    }
+  }
+  // Always keep the world topped up to MAX_POWERUPS
+  while (powerUps.length < MAX_POWERUPS) spawnPowerUp();
+}
+function drawPowerUps(ctx){
+  for (const p of powerUps){
+    ctx.save(); ctx.translate(p.x, p.y);
+    if (p.type==='shield'){ ctx.strokeStyle='#7ed6df'; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(0,0,14,0,Math.PI*2); ctx.stroke(); }
+    else if (p.type==='bubble'){ ctx.fillStyle='#9ad0ff'; ctx.beginPath(); ctx.arc(0,0,10,0,Math.PI*2); ctx.fill(); }
+    else if (p.type==='homing'){ ctx.strokeStyle='#f1c40f'; ctx.beginPath(); ctx.arc(0,0,12,0,Math.PI*2); ctx.stroke(); ctx.beginPath(); ctx.moveTo(-6,0); ctx.lineTo(6,0); ctx.stroke(); }
+    else if (p.type==='size'){ ctx.fillStyle='#a29bfe'; ctx.beginPath(); ctx.moveTo(0,-10); ctx.lineTo(-8,8); ctx.lineTo(8,8); ctx.closePath(); ctx.fill(); }
+    else if (p.type==='bouncy'){ ctx.fillStyle='#e67e22'; ctx.beginPath(); ctx.arc(0,0,9,0,Math.PI*2); ctx.fill(); }
+    ctx.restore();
+  }
+}
+// === Explosion & Overlay helpers ===
+function triggerCrashExplosion(){
+  if (!player) return;
+  const cx = player.x, cy = player.y;
+  player.visible = false;
+  gameState = 'exploding';
+  endScreen.style.display = 'none';
+  explosionParticles = []; shockwaves = [];
+  explosionFrames = 100; shake = 18;
+  // fiery radial sparks
+  for (let i=0;i<220;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = 2 + Math.random()*9;
+    explosionParticles.push({x:cx,y:cy,vx:Math.cos(a)*sp + player.dx*0.4, vy:Math.sin(a)*sp + player.dy*0.4, life:40+Math.random()*40, r:2+Math.random()*3, color:(i%3===0?'#ffffff':(i%3===1?'#f1c40f':'#e67e22'))});
+  }
+  // debris shards (triangles)
+  for (let i=0;i<12;i++){
+    const a = Math.random()*Math.PI*2, sp = 4 + Math.random()*6;
+    explosionParticles.push({x:cx,y:cy,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:70+Math.random()*40,debris:true,rot:Math.random()*Math.PI*2,vr:(Math.random()-0.5)*0.4,color:'#95a5a6'});
+  }
+  shockwaves.push({x:cx,y:cy,r:10,vr:40,alpha:0.8});
+}
+function updateExplosion(){
+  for (let i=explosionParticles.length-1;i>=0;i--){
+    const p = explosionParticles[i];
+    p.x+=p.vx; p.y+=p.vy; p.life-=1;
+    if (p.debris){ p.vy += 0.08; p.rot += p.vr; }
+    else { p.vx*=0.98; p.vy*=0.98; }
+    if (p.life<=0) explosionParticles.splice(i,1);
+  }
+  for (const s of shockwaves){ s.r += s.vr; s.alpha *= 0.92; }
+  shockwaves = shockwaves.filter(s=>s.alpha>0.05);
+  explosionFrames--; shake *= 0.92;
+  if (explosionFrames<=0){
+    endMessageEl.textContent = 'You Crashed!';
+    endScreen.style.display = 'flex';
+    gameState = 'over';
+    cancelAnimationFrame(animationFrameId);
+  }
+}
+function drawExplosion(ctx){
+  if (gameState !== 'exploding') return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of explosionParticles){
+    if (p.debris){
+      ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.rot);
+      ctx.fillStyle = p.color; ctx.beginPath(); ctx.moveTo(0,-6); ctx.lineTo(-4,4); ctx.lineTo(4,4); ctx.closePath(); ctx.fill(); ctx.restore();
+    } else {
+      ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 3;
+  for (const s of shockwaves){ ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,Math.PI*2); ctx.stroke(); }
+  ctx.restore();
+}
+
+function powerName(t){
+  switch(t){
+    case 'shield': return 'SHIELD';
+    case 'bubble': return 'BUBBLE GUN';
+    case 'homing': return 'HOMING BULLETS';
+    case 'size': return 'SIZE INCREASE';
+    case 'bouncy': return 'BOUNCING BULLETS';
+    default: return (t||'POWER UP').toUpperCase();
+  }
+}
+function styleColorForType(t){
+  return t==='shield' ? '#7ed6df' : t==='bubble' ? '#9ad0ff' : t==='homing' ? '#f1c40f' : t==='size' ? '#a29bfe' : t==='bouncy' ? '#e67e22' : '#ffffff';
+}
+function triggerPowerOverlay(type){
+  overlay = { type, text: powerName(type), start: frameCount, letters: [], duration: 120, font: null };
+  layoutOverlay();
+}
+function layoutOverlay(){
+  if (!overlay) return;
+  const text = overlay.text; let size = Math.min(canvas.width*0.18, canvas.height*0.25);
+  const tmp = ctx;
+  tmp.save(); tmp.textBaseline='middle'; tmp.textAlign='left';
+  while (true){
+    tmp.font = `${Math.floor(size)}px 'Press Start 2P', monospace`;
+    const w = tmp.measureText(text).width;
+    if (w <= canvas.width*0.86 || size<24) break;
+    size -= 6;
+  }
+  overlay.font = tmp.font;
+  const totalW = tmp.measureText(text).width;
+  let x = (canvas.width - totalW)/2; const y = canvas.height/2; overlay.letters = [];
+  for (let i=0;i<text.length;i++){
+    const ch = text[i]; const w = tmp.measureText(ch).width;
+    overlay.letters.push({ch, x:x + w/2, y, w, popped:false, popAt: overlay.start + 30 + i*6});
+    x += w;
+  }
+  tmp.restore();
+}
+function drawPowerOverlay(ctx){
+  if (!overlay) return;
+  const elapsed = frameCount - overlay.start;
+  const fade = Math.max(0, 1 - elapsed/overlay.duration);
+  if (fade<=0){ overlay=null; overlayLetterBursts=[]; return; }
+
+  ctx.save(); ctx.textBaseline='middle'; ctx.textAlign='center';
+  ctx.font = overlay.font || `120px 'Press Start 2P', monospace`;
+  const color = styleColorForType(overlay.type);
+
+  for (let i=0;i<overlay.letters.length;i++){
+    const L = overlay.letters[i];
+    if (overlay.type==='bubble' && !L.popped && frameCount >= L.popAt){
+      L.popped = true;
+      for (let k=0;k<14;k++){
+        const a=Math.random()*Math.PI*2, sp=1+Math.random()*2;
+        overlayLetterBursts.push({x:L.x,y:L.y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-1.2,r:1.5+Math.random()*2,life:45});
+      }
+    }
+    if (overlay.type==='bubble' && L.popped) continue;
+    const wob = overlay.type==='bouncy' ? Math.sin(frameCount*0.3 + i)*8 : 0;
+    const scale = 1 + (overlay.type==='size' ? 0.2*Math.sin(frameCount*0.2) : 0);
+    ctx.save(); ctx.translate(L.x, L.y + wob); ctx.scale(scale, scale);
+    ctx.lineWidth = 10; ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.globalAlpha = 0.9 * fade; ctx.strokeText(L.ch, 0, 0);
+    ctx.fillStyle = color; ctx.globalAlpha = 0.95 * fade; ctx.fillText(L.ch, 0, 0);
+    if (overlay.type==='bubble'){ ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.strokeText(L.ch, 0, 0); }
+    ctx.restore();
+  }
+  for (let j=overlayLetterBursts.length-1;j>=0;j--){
+    const p=overlayLetterBursts[j];
+    p.x+=p.vx; p.y+=p.vy; p.vy+=0.02; p.life--;
+    ctx.globalAlpha=Math.max(0,p.life/45)*fade; ctx.fillStyle='#9ad0ff';
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    if (p.life<=0) overlayLetterBursts.splice(j,1);
+  }
+  ctx.restore();
+}
 </script>
 </body>
 </html>
